@@ -33,6 +33,12 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/* 2 Hz blink: 500 ms period, half on / half off */
+#define LED_BLINK_HALF_PERIOD_MS  250U
+
+/* Pins of the two RGB LEDs, grouped by port */
+#define LED_GPIOE_PINS  (RRGB_R_Pin | RRGB_G_Pin | RRGB_B_Pin | LRGB_R_Pin)
+#define LED_GPIOG_PINS  (LRGB_G_Pin | LRGB_B_Pin)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -97,6 +103,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+    HAL_GPIO_TogglePin(GPIOE, LED_GPIOE_PINS);
+    HAL_GPIO_TogglePin(GPIOG, LED_GPIOG_PINS);
+    HAL_Delay(LED_BLINK_HALF_PERIOD_MS);
   }
   /* USER CODE END 3 */
 }

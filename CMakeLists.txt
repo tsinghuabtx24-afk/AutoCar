@@ -66,3 +66,16 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 
     # Add user defined libraries
 )
+
+# Generate .hex and .bin images next to the .elf for flashing tools that need
+# raw machine code (e.g. DAPLink mass-storage drag-and-drop). The .elf keeps the
+# debug info and stays the input of choice for GDB / pyOCD / OpenOCD.
+add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_OBJCOPY} -O ihex
+            $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.hex
+    COMMAND ${CMAKE_OBJCOPY} -O binary
+            $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
+            $<TARGET_FILE_DIR:${CMAKE_PROJECT_NAME}>/${CMAKE_PROJECT_NAME}.bin
+    COMMENT "Generating ${CMAKE_PROJECT_NAME}.hex and ${CMAKE_PROJECT_NAME}.bin"
+)
