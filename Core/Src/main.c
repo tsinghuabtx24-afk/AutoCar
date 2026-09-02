@@ -33,12 +33,9 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/* 2 Hz blink: 500 ms period, half on / half off */
-#define LED_BLINK_HALF_PERIOD_MS  250U
+/* RGB LED timing: 0.2s on, 0.2s off */
+#define RGB_PERIOD_MS  200U
 
-/* Pins of the two RGB LEDs, grouped by port */
-#define LED_GPIOE_PINS  (RRGB_R_Pin | RRGB_G_Pin | RRGB_B_Pin | LRGB_R_Pin)
-#define LED_GPIOG_PINS  (LRGB_G_Pin | LRGB_B_Pin)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -49,6 +46,8 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
+/* Buzzer control flag */
+volatile uint8_t buzzer_on = 0;
 
 /* USER CODE END PV */
 
@@ -60,6 +59,48 @@ void SystemClock_Config(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/**
+  * @brief  Set RGB LED color
+  * @param  r: Red state (1 = on, 0 = off)
+  * @param  g: Green state (1 = on, 0 = off)
+  * @param  b: Blue state (1 = on, 0 = off)
+  * @retval None
+  */
+void RGB_SetColor(uint8_t r, uint8_t g, uint8_t b)
+{
+  HAL_GPIO_WritePin(RRGB_R_GPIO_Port, RRGB_R_Pin, r ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(RRGB_G_GPIO_Port, RRGB_G_Pin, g ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(RRGB_B_GPIO_Port, RRGB_B_Pin, b ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LRGB_R_GPIO_Port, LRGB_R_Pin, r ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LRGB_G_GPIO_Port, LRGB_G_Pin, g ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(LRGB_B_GPIO_Port, LRGB_B_Pin, b ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+/**
+  * @brief  EXTI line detection callback
+  * @param  GPIO_Pin: Specifies the pins connected EXTI line
+  * @retval None
+  */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+  if (GPIO_Pin == key1_Pin || GPIO_Pin == key3_Pin)
+  {
+    /* Key1 or Key3 pressed: turn on buzzer */
+    buzzer_on = 1;
+    HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(led1_GPIO_Port, led1_Pin, GPIO_PIN_SET);
+    HAL_GPIO_WritePin(led2_GPIO_Port, led2_Pin, GPIO_PIN_RESET);
+  }
+  else if (GPIO_Pin == key2_Pin)
+  {
+    /* Key2 pressed: turn off buzzer */
+    buzzer_on = 0;
+    HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(led1_GPIO_Port, led1_Pin, GPIO_PIN_RESET);
+    HAL_GPIO_WritePin(led2_GPIO_Port, led2_Pin, GPIO_PIN_SET);
+  }
+}
 
 /* USER CODE END 0 */
 
@@ -94,18 +135,45 @@ int main(void)
   MX_GPIO_Init();
   /* USER CODE BEGIN 2 */
 
+  /* Initialize LED2 as on (buzzer is off by default) */
+  HAL_GPIO_WritePin(led2_GPIO_Port, led2_Pin, GPIO_PIN_SET);
+
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
+  /* Rainbow colors array: R, G, B */
+  const uint8_t rainbow[][3] = {
+    {1, 0, 0},  /* Red */
+    {1, 1, 0},  /* Yellow */
+    {0, 1, 0},  /* Green */
+    {0, 1, 1},  /* Cyan */
+    {0, 0, 1},  /* Blue */
+    {1, 0, 1},  /* Magenta */
+  };
+  uint8_t color_index = 0;
+
   while (1)
   {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-    HAL_GPIO_TogglePin(GPIOE, LED_GPIOE_PINS);
-    HAL_GPIO_TogglePin(GPIOG, LED_GPIOG_PINS);
-    HAL_Delay(LED_BLINK_HALF_PERIOD_MS);
+
+    /* Display current rainbow color */
+    RGB_SetColor(rainbow[color_index][0], rainbow[color_index][1], rainbow[color_index][2]);
+    HAL_Delay(RGB_PERIOD_MS);
+
+    /* Turn off RGB */
+    RGB_SetColor(0, 0, 0);
+    HAL_Delay(RGB_PERIOD_MS);
+
+    /* Move to next color */
+    color_index++;
+    if (color_index >= 6)
+    {
+      color_index = 0;
+    }
   }
   /* USER CODE END 3 */
 }
