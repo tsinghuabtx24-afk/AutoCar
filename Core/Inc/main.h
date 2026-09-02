@@ -54,16 +54,7 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin);
-
-/* Motor control functions */
-void Motor_Stop(void);
-void Car_Forward(int16_t time);
-void Car_Backward(int16_t time);
-void Car_TurnLeft(int16_t time);
-void Car_TurnRight(int16_t time);
-void Car_RotateLeft(int16_t time);
-void Car_RotateRight(int16_t time);
-void Car_Brake(void);
+void RGB_SetColor(uint8_t r, uint8_t g, uint8_t b);
 
 /* USER CODE END EFP */
 
@@ -78,14 +69,6 @@ void Car_Brake(void);
 #define LRGB_G_GPIO_Port GPIOG
 #define LRGB_R_Pin GPIO_PIN_7
 #define LRGB_R_GPIO_Port GPIOE
-#define M3A_Pin GPIO_PIN_9
-#define M3A_GPIO_Port GPIOE
-#define M3B_Pin GPIO_PIN_11
-#define M3B_GPIO_Port GPIOE
-#define M4A_Pin GPIO_PIN_13
-#define M4A_GPIO_Port GPIOE
-#define M4B_Pin GPIO_PIN_14
-#define M4B_GPIO_Port GPIOE
 #define LRGB_B_Pin GPIO_PIN_2
 #define LRGB_B_GPIO_Port GPIOG
 #define key1_Pin GPIO_PIN_3
@@ -97,14 +80,6 @@ void Car_Brake(void);
 #define key3_Pin GPIO_PIN_5
 #define key3_GPIO_Port GPIOG
 #define key3_EXTI_IRQn EXTI9_5_IRQn
-#define M1A_Pin GPIO_PIN_6
-#define M1A_GPIO_Port GPIOC
-#define M1B_Pin GPIO_PIN_7
-#define M1B_GPIO_Port GPIOC
-#define M2A_Pin GPIO_PIN_8
-#define M2A_GPIO_Port GPIOC
-#define M2B_Pin GPIO_PIN_9
-#define M2B_GPIO_Port GPIOC
 #define Buzzer_Pin GPIO_PIN_12
 #define Buzzer_GPIO_Port GPIOG
 #define led1_Pin GPIO_PIN_14

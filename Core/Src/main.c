@@ -18,10 +18,12 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "tim.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "car.h"
 
 /* USER CODE END Includes */
 
@@ -36,10 +38,11 @@
 /* RGB LED timing: 0.2s on, 0.2s off */
 #define RGB_PERIOD_MS  200U
 
-/* 电机接线极性补偿：左侧（M1/M2）实测转向与右侧（M3/M4）相反，故取 -1。
-   若整车前后方向相反，把下面两个宏同时取反。 */
-#define MOTOR_LEFT_POLARITY   (-1)
-#define MOTOR_RIGHT_POLARITY  (1)
+/* 演示用的运动速度（百分比）和各动作之间的停顿时间 */
+#define DEMO_SPEED_RUN     100U   /* 直线行驶速度 */
+#define DEMO_SPEED_TURN    100U   /* 转弯速度 */
+#define DEMO_SPEED_ROTATE  100U   /* 原地旋转速度 */
+#define DEMO_GAP_MS        500U  /* 动作间隔 */
 
 /* USER CODE END PD */
 
@@ -78,7 +81,7 @@ void RGB_SetColor(uint8_t r, uint8_t g, uint8_t b)
   HAL_GPIO_WritePin(RRGB_G_GPIO_Port, RRGB_G_Pin, g ? GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(RRGB_B_GPIO_Port, RRGB_B_Pin, b ? GPIO_PIN_SET : GPIO_PIN_RESET);
 
-  /* 左侧 RGB 的红、绿两路实际接线互换，此处交换补偿，使两侧显示同色 */
+
   HAL_GPIO_WritePin(LRGB_R_GPIO_Port, LRGB_R_Pin, g ? GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(LRGB_G_GPIO_Port, LRGB_G_Pin, r ? GPIO_PIN_SET : GPIO_PIN_RESET);
   HAL_GPIO_WritePin(LRGB_B_GPIO_Port, LRGB_B_Pin, b ? GPIO_PIN_SET : GPIO_PIN_RESET);
@@ -109,126 +112,7 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
   }
 }
 
-/**
-  * @brief  设置单个电机的转向
-  * @param  A_Port/A_Pin: 电机A相引脚
-  * @param  B_Port/B_Pin: 电机B相引脚
-  * @param  dir: 方向，+1 = 正转，-1 = 反转，0 = 停止
-  * @retval None
-  */
-static void Motor_SetDir(GPIO_TypeDef *A_Port, uint16_t A_Pin,
-                         GPIO_TypeDef *B_Port, uint16_t B_Pin, int8_t dir)
-{
-  HAL_GPIO_WritePin(A_Port, A_Pin, (dir > 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-  HAL_GPIO_WritePin(B_Port, B_Pin, (dir < 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
-}
-
-/**
-  * @brief  按车体方向驱动左右两侧车轮
-  * @param  left:  左侧方向，+1 = 向前，-1 = 向后，0 = 停止
-  * @param  right: 右侧方向，+1 = 向前，-1 = 向后，0 = 停止
-  * @retval None
-  * @note   M1 左前、M2 左后、M3 右前、M4 右后。
-  *         左侧两只电机接线极性与右侧相反，用 MOTOR_LEFT_POLARITY 统一补偿，
-  *         若整车方向相反，把两个极性宏同时取反即可。
-  */
-static void Motor_Drive(int8_t left, int8_t right)
-{
-  Motor_SetDir(M1A_GPIO_Port, M1A_Pin, M1B_GPIO_Port, M1B_Pin, MOTOR_LEFT_POLARITY  * left);
-  Motor_SetDir(M2A_GPIO_Port, M2A_Pin, M2B_GPIO_Port, M2B_Pin, MOTOR_LEFT_POLARITY  * left);
-  Motor_SetDir(M3A_GPIO_Port, M3A_Pin, M3B_GPIO_Port, M3B_Pin, MOTOR_RIGHT_POLARITY * right);
-  Motor_SetDir(M4A_GPIO_Port, M4A_Pin, M4B_GPIO_Port, M4B_Pin, MOTOR_RIGHT_POLARITY * right);
-}
-
-/**
-  * @brief  停止所有电机
-  * @retval None
-  */
-void Motor_Stop(void)
-{
-  Motor_Drive(0, 0);
-}
-
-/**
-  * @brief  小车前进
-  * @param  time: 运动时长（毫秒）
-  * @retval None
-  */
-void Car_Forward(int16_t time)
-{
-  Motor_Drive(1, 1);   /* 两侧同时向前 */
-  HAL_Delay(time);
-  Motor_Stop();
-}
-
-/**
-  * @brief  小车后退
-  * @param  time: 运动时长（毫秒）
-  * @retval None
-  */
-void Car_Backward(int16_t time)
-{
-  Motor_Drive(-1, -1); /* 两侧同时向后 */
-  HAL_Delay(time);
-  Motor_Stop();
-}
-
-/**
-  * @brief  小车左转（左侧轮慢，右侧轮快）
-  * @param  time: 运动时长（毫秒）
-  * @retval None
-  */
-void Car_TurnLeft(int16_t time)
-{
-  Motor_Drive(0, 1);   /* 左侧停、右侧向前，以左轮为中心左转 */
-  HAL_Delay(time);
-  Motor_Stop();
-}
-
-/**
-  * @brief  小车右转（右侧轮慢，左侧轮快）
-  * @param  time: 运动时长（毫秒）
-  * @retval None
-  */
-void Car_TurnRight(int16_t time)
-{
-  Motor_Drive(1, 0);   /* 左侧向前、右侧停，以右轮为中心右转 */
-  HAL_Delay(time);
-  Motor_Stop();
-}
-
-/**
-  * @brief  小车左旋转（原地左转）
-  * @param  time: 运动时长（毫秒）
-  * @retval None
-  */
-void Car_RotateLeft(int16_t time)
-{
-  Motor_Drive(-1, 1);  /* 左后右前，原地左旋 */
-  HAL_Delay(time);
-  Motor_Stop();
-}
-
-/**
-  * @brief  小车右旋转（原地右转）
-  * @param  time: 运动时长（毫秒）
-  * @retval None
-  */
-void Car_RotateRight(int16_t time)
-{
-  Motor_Drive(1, -1);  /* 左前右后，原地右旋 */
-  HAL_Delay(time);
-  Motor_Stop();
-}
-
-/**
-  * @brief  小车制动（立即停止）
-  * @retval None
-  */
-void Car_Brake(void)
-{
-  Motor_Stop();
-}
+/* 电机与小车运动函数分别位于 tim.c 和 car.c */
 
 /* USER CODE END 0 */
 
@@ -261,10 +145,15 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_TIM1_Init();
+  MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
 
   /* Initialize LED2 as on (buzzer is off by default) */
   HAL_GPIO_WritePin(led2_GPIO_Port, led2_Pin, GPIO_PIN_SET);
+
+  /* 启动 8 路电机 PWM，初始为静止 */
+  Car_Init();
 
   /* USER CODE END 2 */
 
@@ -277,42 +166,41 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    /* 小车运动演示程序 */
+    /* 小车运动演示：每个动作用一种 RGB 颜色标识，结束后自动制动 */
 
-    /* 1. 前进2秒 */
-    // RGB_SetColor(1, 0, 0);  /* 红色 - 前进 */
-    // Car_Forward(2000);
-    // HAL_Delay(500);  /* 间隔 */
+    /* 1. 前进 2 秒 */
+    RGB_SetColor(1, 0, 0);                      /* 红色 */
+    Car_Forward(DEMO_SPEED_RUN, 2000);
+    Car_Brake(DEMO_GAP_MS);
 
-    // /* 2. 后退2秒 */
-    // RGB_SetColor(1, 1, 0);  /* 黄色 - 后退 */
-    // Car_Backward(2000);
-    // HAL_Delay(500);
+    /* 2. 后退 2 秒 */
+    RGB_SetColor(1, 1, 0);                      /* 黄色 */
+    Car_Backward(DEMO_SPEED_RUN, 2000);
+    Car_Brake(DEMO_GAP_MS);
 
-    // /* 3. 左转1秒 */
-    // RGB_SetColor(0, 1, 0);  /* 绿色 - 左转 */
-    // Car_TurnLeft(1000);
-    // HAL_Delay(500);
+    /* 3. 左转 1.5 秒 */
+    RGB_SetColor(0, 1, 0);                      /* 绿色 */
+    Car_TurnLeft(DEMO_SPEED_TURN, 1500);
+    Car_Brake(DEMO_GAP_MS);
 
-    // /* 4. 右转1秒 */
-    // RGB_SetColor(0, 1, 1);  /* 青色 - 右转 */
-    // Car_TurnRight(1000);
-    // HAL_Delay(500);
+    /* 4. 右转 1.5 秒 */
+    RGB_SetColor(0, 1, 1);                      /* 青色 */
+    Car_TurnRight(DEMO_SPEED_TURN, 1500);
+    Car_Brake(DEMO_GAP_MS);
 
-    // /* 5. 左旋转1秒 */
-    // RGB_SetColor(0, 0, 1);  /* 蓝色 - 左旋转 */
-    // Car_RotateLeft(1000);
-    // HAL_Delay(500);
+    /* 5. 左旋转 1 秒 */
+    RGB_SetColor(0, 0, 1);                      /* 蓝色 */
+    Car_RotateLeft(DEMO_SPEED_ROTATE, 1000);
+    Car_Brake(DEMO_GAP_MS);
 
-    // /* 6. 右旋转1秒 */
-    // RGB_SetColor(1, 0, 1);  /* 品红色 - 右旋转 */
-    // Car_RotateRight(1000);
-    // HAL_Delay(500);
+    /* 6. 右旋转 1 秒 */
+    RGB_SetColor(1, 0, 1);                      /* 品红色 */
+    Car_RotateRight(DEMO_SPEED_ROTATE, 1000);
+    Car_Brake(DEMO_GAP_MS);
 
-    // /* 7. 制动并等待 */
-    // RGB_SetColor(0, 0, 0);  /* 关闭RGB */
-    // Car_Brake();
-    // HAL_Delay(2000);  /* 停止2秒后重复 */
+    /* 7. 制动 2 秒后重复 */
+    RGB_SetColor(0, 0, 0);                      /* 熄灯 */
+    Car_Brake(2000);
   }
   /* USER CODE END 3 */
 }
