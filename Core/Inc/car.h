@@ -56,6 +56,19 @@ extern "C" {
 #define CAR_SPEED_BASE         MOTOR_SPEED_MIN
 #define CAR_SPEED_SPAN         (MOTOR_SPEED_MAX - CAR_SPEED_BASE)
 
+/* ==== 变速直线参数 ==========================================================
+   变速直线把速度按时间线性插值，每 CAR_RAMP_STEP_MS 下发一次。步长越小越
+   平滑，但 HAL_Delay 只有 1ms 分辨率，再小也换不来更细的台阶；20ms 时
+   1.5 秒的行程有 75 级速度，肉眼已经看不出分段。
+   ============================================================================ */
+#define CAR_RAMP_STEP_MS       20U
+
+/* 演示用的变速区间。下限取 60 而不是 CAR_SPEED_BASE：有效速度太低时
+   电机刚出死区，转速对占空比的响应很不线性，起步会一顿一顿的。 */
+#define RAMP_SPEED_LO          60U
+#define RAMP_SPEED_HI          100U
+#define RAMP_MS                1500U  /* 单程加速（或减速）的时间 */
+
 /* ==== 三叶草轨迹参数 ========================================================
    下面两个时间必须在实际场地上标定，给的是起点值不是正确值。开环靠时间估算，
    电池电压、地面摩擦、载重都会改变结果。标定顺序：
@@ -74,6 +87,7 @@ void Car_Init(void);
 
 void Car_Forward(uint8_t speed, uint16_t time);
 void Car_Backward(uint8_t speed, uint16_t time);
+void Car_ForwardVary(uint8_t speed_from, uint8_t speed_to, uint16_t time);
 void Car_TurnLeft(uint8_t speed, uint16_t radius_mm, uint16_t time);
 void Car_TurnRight(uint8_t speed, uint16_t radius_mm, uint16_t time);
 void Car_RotateLeft(uint8_t speed, uint16_t time);

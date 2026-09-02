@@ -167,13 +167,19 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    /* 三叶草轨迹：走完三片叶子后车头方向复原，可无缝重复 */
-    RGB_SetColor(0, 1, 0);                      /* 绿色 - 正在走轨迹 */
-    Car_Clover(CLOVER_SPEED, CLOVER_RADIUS_MM, CLOVER_LEAF_MS);
-
-    /* 熄灯制动后重复 */
-    RGB_SetColor(0, 0, 0);
+    /* 变速直线：先加速再减速，走一个梭形速度曲线 */
+    RGB_SetColor(0, 0, 1);                      /* 蓝色 - 正在变速直线 */
+    Car_ForwardVary(RAMP_SPEED_LO, RAMP_SPEED_HI, RAMP_MS);   /* 加速 */
+    Car_ForwardVary(RAMP_SPEED_HI, RAMP_SPEED_LO, RAMP_MS);   /* 减速 */
     Car_Brake(TRAJ_GAP_MS);
+
+    // /* 三叶草轨迹：走完三片叶子后车头方向复原，可无缝重复 */
+    // RGB_SetColor(0, 1, 0);                      /* 绿色 - 正在走轨迹 */
+    // Car_Clover(CLOVER_SPEED, CLOVER_RADIUS_MM, CLOVER_LEAF_MS);
+
+    // /* 熄灯制动后重复 */
+    // RGB_SetColor(0, 0, 0);
+    // Car_Brake(TRAJ_GAP_MS);
   }
   /* USER CODE END 3 */
 }

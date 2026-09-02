@@ -159,6 +159,43 @@ void Car_Backward(uint8_t speed, uint16_t time)
 }
 
 /**
+  * @brief  变速直线：速度在 time 内从 speed_from 线性变到 speed_to
+  * @param  speed_from: 起始速度百分比 0~100
+  * @param  speed_to:   结束速度百分比 0~100，比起始小就是减速
+  * @param  time:       全程时间（毫秒），结束后自动制动
+  *
+  * @note   插值在**有效速度**刻度上做。若按占空比插值，50% 的死区偏置也
+  *         被算进插值区间，速度-时间曲线在低速段会被压扁，加速度不恒定。
+  *
+  * @note   每 CAR_RAMP_STEP_MS 更新一次占空比。time 不是步长整数倍时，
+  *         余下的零头并在最后一步，保证总时间准确、末速正好是 speed_to。
+  */
+void Car_ForwardVary(uint8_t speed_from, uint8_t speed_to, uint16_t time)
+{
+  int16_t  v0    = (int16_t)Car_ToEff(speed_from);
+  int16_t  v1    = (int16_t)Car_ToEff(speed_to);
+  uint16_t steps = (uint16_t)(time / CAR_RAMP_STEP_MS);
+
+  for (uint16_t i = 1U; i <= steps; i++)
+  {
+    /* v0 + (v1-v0)·i/steps，整数运算先乘后除保精度 */
+    int16_t v = (int16_t)(v0 + (int32_t)(v1 - v0) * (int32_t)i / (int32_t)steps);
+
+    Car_Drive(v, v);
+    HAL_Delay(CAR_RAMP_STEP_MS);
+  }
+
+  /* 不足一个步长的零头（含 time < CAR_RAMP_STEP_MS 的情况）按末速补齐 */
+  if ((uint16_t)(time % CAR_RAMP_STEP_MS) > 0U)
+  {
+    Car_Drive(v1, v1);
+    HAL_Delay((uint16_t)(time % CAR_RAMP_STEP_MS));
+  }
+
+  Motor_BrakeAll();
+}
+
+/**
   * @brief  左转，转弯半径可调
   * @param  speed:     外侧（右侧）车轮速度百分比 0~100
   * @param  radius_mm: 转弯半径（车体中心线到圆心），单位 mm
