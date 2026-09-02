@@ -22,6 +22,7 @@
 #include "stm32f1xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "encoder.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -187,6 +188,14 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
+
+  /* 每 1ms 采一次编码器。放在中断里而不是主循环，是因为运动函数全靠
+     HAL_Delay() 阻塞，主循环几秒都轮不到一次 —— 而 CNT 只有 16 位且
+     会绕回，漏采样就等于里程算错。1ms 一次，四路读寄存器加累加，
+     开销几十条指令，可以忽略。
+     必须在 HAL_IncTick() 之后：Encoder_Update() 内部用 HAL_GetTick()
+     算转速的时间基准。 */
+  Encoder_Update();
 
   /* USER CODE END SysTick_IRQn 1 */
 }

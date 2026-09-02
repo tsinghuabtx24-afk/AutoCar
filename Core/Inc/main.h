@@ -124,8 +124,6 @@ void RGB_SetColor(uint8_t r, uint8_t g, uint8_t b);
 #define led1_GPIO_Port GPIOG
 #define led2_Pin GPIO_PIN_15
 #define led2_GPIO_Port GPIOG
-#define H2B_Pin GPIO_PIN_3
-#define H2B_GPIO_Port GPIOB
 #define H4A_Pin GPIO_PIN_4
 #define H4A_GPIO_Port GPIOB
 #define H4B_Pin GPIO_PIN_5

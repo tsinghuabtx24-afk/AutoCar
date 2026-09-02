@@ -19,11 +19,16 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "tim.h"
+#include "usart.h"
 #include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "car.h"
+#include "encoder.h"
+#include "retarget.h"
+
+#include <stdio.h>
 
 /* USER CODE END Includes */
 
@@ -148,13 +153,29 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM4_Init();
   MX_TIM5_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
 
   /* Initialize LED2 as on (buzzer is off by default) */
   HAL_GPIO_WritePin(led2_GPIO_Port, led2_Pin, GPIO_PIN_SET);
 
+  /* printf → USART1(PA9)。必须在 MX_USART1_UART_Init() 之后 */
+  Retarget_Init();
+  printf("\r\n=== AutoCar boot ===\r\n");
+  printf("encoder: %u counts/rev (PPR %u x%u, gear %u), wheel %umm\r\n",
+         (unsigned)ENC_COUNTS_PER_REV, (unsigned)ENC_PPR,
+         (unsigned)ENC_QUAD_FACTOR, (unsigned)ENC_GEAR_RATIO,
+         (unsigned)ENC_WHEEL_DIA_MM);
+
   /* 启动 8 路电机 PWM，初始为静止 */
   Car_Init();
+
+  /* 启动四路编码器。之后由 SysTick 每 1ms 自动采样，无需在主循环里调用。
+     标定用的观察量（调试器里加 Watch）：
+       Encoder_GetCount(MOTOR_1)   四路计数，前进时应全为正
+       Encoder_GetDistanceAvg()    车体里程 mm
+       Encoder_GetSpeedRpm(...)    轮子转速 rpm */
+  Encoder_Init();
 
   /* USER CODE END 2 */
 
