@@ -34,6 +34,14 @@ extern "C" {
 
 extern TIM_HandleTypeDef htim1;
 
+extern TIM_HandleTypeDef htim2;
+
+extern TIM_HandleTypeDef htim3;
+
+extern TIM_HandleTypeDef htim4;
+
+extern TIM_HandleTypeDef htim5;
+
 extern TIM_HandleTypeDef htim8;
 
 /* USER CODE BEGIN Private defines */
@@ -59,13 +67,20 @@ typedef enum
 /* 速度上限（百分比）*/
 #define MOTOR_SPEED_MAX      100U
 
-/* 最小有效占空比：低于此值电机堵转、只会发出嗡嗡声而不转动，
-   因此所有非零速度都会被抬到这个下限。实测可按整车负载调整。 */
-#define MOTOR_SPEED_MIN      30U
+/* 死区上界：占空比**不超过**此值时电机堵转，只发出嗡嗡声而不转动。
+   注意是"不超过"而不是"低于" —— 50% 本身也是不转的，所以能动的
+   最小占空比是 MOTOR_SPEED_MIN + 1。
+   这个值同时被 car.h 用作 CAR_SPEED_BASE：车层所有速度运算都先减掉它、
+   在有效区间内按比例算、再加回来。实测出更准的阈值就改这一行。 */
+#define MOTOR_SPEED_MIN      50U
 
 /* USER CODE END Private defines */
 
 void MX_TIM1_Init(void);
+void MX_TIM2_Init(void);
+void MX_TIM3_Init(void);
+void MX_TIM4_Init(void);
+void MX_TIM5_Init(void);
 void MX_TIM8_Init(void);
 
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
@@ -78,6 +93,7 @@ void Motor_Backward(Motor_ID motor, uint8_t speed);
 void Motor_Brake(Motor_ID motor);
 void Motor_Coast(Motor_ID motor);
 void Motor_SetSpeed(Motor_ID motor, int8_t speed);
+void Motor_SetSpeedRaw(Motor_ID motor, int8_t speed);
 void Motor_BrakeAll(void);
 
 /* USER CODE END Prototypes */

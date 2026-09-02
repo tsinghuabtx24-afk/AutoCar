@@ -38,11 +38,8 @@
 /* RGB LED timing: 0.2s on, 0.2s off */
 #define RGB_PERIOD_MS  200U
 
-/* 演示用的运动速度（百分比）和各动作之间的停顿时间 */
-#define DEMO_SPEED_RUN     100U   /* 直线行驶速度 */
-#define DEMO_SPEED_TURN    100U   /* 转弯速度 */
-#define DEMO_SPEED_ROTATE  100U   /* 原地旋转速度 */
-#define DEMO_GAP_MS        500U  /* 动作间隔 */
+/* 轨迹间的停顿时间 */
+#define TRAJ_GAP_MS    2000U
 
 /* USER CODE END PD */
 
@@ -147,6 +144,10 @@ int main(void)
   MX_GPIO_Init();
   MX_TIM1_Init();
   MX_TIM8_Init();
+  MX_TIM2_Init();
+  MX_TIM3_Init();
+  MX_TIM4_Init();
+  MX_TIM5_Init();
   /* USER CODE BEGIN 2 */
 
   /* Initialize LED2 as on (buzzer is off by default) */
@@ -166,41 +167,13 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    /* 小车运动演示：每个动作用一种 RGB 颜色标识，结束后自动制动 */
+    /* 三叶草轨迹：走完三片叶子后车头方向复原，可无缝重复 */
+    RGB_SetColor(0, 1, 0);                      /* 绿色 - 正在走轨迹 */
+    Car_Clover(CLOVER_SPEED, CLOVER_RADIUS_MM, CLOVER_LEAF_MS);
 
-    /* 1. 前进 2 秒 */
-    RGB_SetColor(1, 0, 0);                      /* 红色 */
-    Car_Forward(DEMO_SPEED_RUN, 2000);
-    Car_Brake(DEMO_GAP_MS);
-
-    /* 2. 后退 2 秒 */
-    RGB_SetColor(1, 1, 0);                      /* 黄色 */
-    Car_Backward(DEMO_SPEED_RUN, 2000);
-    Car_Brake(DEMO_GAP_MS);
-
-    /* 3. 左转 1.5 秒 */
-    RGB_SetColor(0, 1, 0);                      /* 绿色 */
-    Car_TurnLeft(DEMO_SPEED_TURN, 1500);
-    Car_Brake(DEMO_GAP_MS);
-
-    /* 4. 右转 1.5 秒 */
-    RGB_SetColor(0, 1, 1);                      /* 青色 */
-    Car_TurnRight(DEMO_SPEED_TURN, 1500);
-    Car_Brake(DEMO_GAP_MS);
-
-    /* 5. 左旋转 1 秒 */
-    RGB_SetColor(0, 0, 1);                      /* 蓝色 */
-    Car_RotateLeft(DEMO_SPEED_ROTATE, 1000);
-    Car_Brake(DEMO_GAP_MS);
-
-    /* 6. 右旋转 1 秒 */
-    RGB_SetColor(1, 0, 1);                      /* 品红色 */
-    Car_RotateRight(DEMO_SPEED_ROTATE, 1000);
-    Car_Brake(DEMO_GAP_MS);
-
-    /* 7. 制动 2 秒后重复 */
-    RGB_SetColor(0, 0, 0);                      /* 熄灯 */
-    Car_Brake(2000);
+    /* 熄灯制动后重复 */
+    RGB_SetColor(0, 0, 0);
+    Car_Brake(TRAJ_GAP_MS);
   }
   /* USER CODE END 3 */
 }
