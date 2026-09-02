@@ -54,6 +54,17 @@ void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin);
+
+/* Motor control functions */
+void Motor_Stop(void);
+void Car_Forward(int16_t time);
+void Car_Backward(int16_t time);
+void Car_TurnLeft(int16_t time);
+void Car_TurnRight(int16_t time);
+void Car_RotateLeft(int16_t time);
+void Car_RotateRight(int16_t time);
+void Car_Brake(void);
+
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/
