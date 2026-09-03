@@ -219,6 +219,26 @@ int32_t Encoder_GetDistanceRight(void)
   return Encoder_CountToMm((enc[MOTOR_3].count + enc[MOTOR_4].count) / 2);
 }
 
+int32_t Encoder_GetRotationDeg10(uint16_t wheel_track_mm)
+{
+  int32_t left_mm;
+  int32_t right_mm;
+  int64_t delta_mm;
+
+  if (wheel_track_mm == 0U)
+  {
+    return 0;
+  }
+
+  left_mm  = Encoder_GetDistanceLeft();
+  right_mm = Encoder_GetDistanceRight();
+  delta_mm = (int64_t)right_mm - (int64_t)left_mm;
+
+  /* deg10 = (right-left) / track * 180/pi * 10
+     572.96 用 57296/100 近似，避免使用浮点数。 */
+  return (int32_t)(delta_mm * 57296LL / (int32_t)wheel_track_mm / 100LL);
+}
+
 /**
   * @brief  清零一路编码器的累计量
   * @note   同步刷新 last_cnt，否则下次 Update 会把清零期间的 CNT 变化

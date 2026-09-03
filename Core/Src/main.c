@@ -27,6 +27,7 @@
 /* USER CODE BEGIN Includes */
 #include "car.h"
 #include "encoder.h"
+#include "line_tracker.h"
 #include "retarget.h"
 
 #include <stdio.h>
@@ -230,12 +231,23 @@ int main(void)
     /* USER CODE BEGIN 3 */
 
     /* 按编码器距离运动示例（需要测试时取消对应注释） */
-    Car_ForwardDistance(70U, 1000U);    /* 前进 200mm 后制动 */
-    HAL_Delay(10000U);
-    Car_BackwardDistance(70U, 1000U);   /* 后退 200mm 后制动 */
-    HAL_Delay(10000U);
+    // Car_ForwardDistance(70U, 1000U);    /* 前进 200mm 后制动 */
+    // HAL_Delay(10000U);
+    // Car_BackwardDistance(70U, 1000U);   /* 后退 200mm 后制动 */
+    // HAL_Delay(10000U);
+    // HAL_Delay(3000U);
+    // Car_RotateLeftAngle(100U, 1800U);       /* 原地左转 90.0° */
+    // HAL_Delay(2000U);
+    // Car_RotateRightAngle(100U, 1800U);      /* 原地右转 90.0° */
+    // HAL_Delay(2000U);
+    // Car_TurnLeftAngle(100U, 150U, 3600U);  /* 半径 150mm 左转 90.0° */
+    // HAL_Delay(2000U);
+    // Car_TurnRightAngle(100U, 150U, 3600U); /* 半径 150mm 右转 90.0° */
+    
 
-    /* 编码器诊断：每 500ms 输出四轮计数、里程和 RPM */
+    /* 四路红外黑线循迹（测试时取消注释，并注释掉上面的运动测试） */
+    LineTracker_Run();
+    
     Encoder_PrintStatus();
 
     /* 变速直线：先加速再减速，走一个梭形速度曲线 */
@@ -244,13 +256,7 @@ int main(void)
     // Car_ForwardVary(RAMP_SPEED_HI, RAMP_SPEED_LO, RAMP_MS);   /* 减速 */
     // Car_Brake(TRAJ_GAP_MS);
 
-    // /* 三叶草轨迹：走完三片叶子后车头方向复原，可无缝重复 */
-    // RGB_SetColor(0, 1, 0);                      /* 绿色 - 正在走轨迹 */
-    // Car_Clover(CLOVER_SPEED, CLOVER_RADIUS_MM, CLOVER_LEAF_MS);
 
-    // /* 熄灯制动后重复 */
-    // RGB_SetColor(0, 0, 0);
-    // Car_Brake(TRAJ_GAP_MS);
   }
   /* USER CODE END 3 */
 }

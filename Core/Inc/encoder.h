@@ -51,8 +51,8 @@ extern "C" {
 /* 轮径 mm。拿卷尺量比查手册准，橡胶轮压扁后有效直径会略小。 */
 #define ENC_WHEEL_DIA_MM     65U
 
-/* 轮子转一圈的编码器计数。编码器装在电机轴上，所以要乘减速比。 */
-#define ENC_COUNTS_PER_REV   (ENC_PPR * ENC_QUAD_FACTOR * ENC_GEAR_RATIO)
+/* 实测车轮转一圈约 521 count，里程和转速统一使用该值。 */
+#define ENC_COUNTS_PER_REV   521U
 
 /* ==== 标定补偿系数 ==========================================================
    里程的最终换算是
@@ -92,6 +92,10 @@ int16_t Encoder_GetSpeedRpm(Motor_ID motor);
 int32_t Encoder_GetDistanceAvg(void);
 int32_t Encoder_GetDistanceLeft(void);
 int32_t Encoder_GetDistanceRight(void);
+
+/* 根据左右轮有符号里程差估算车体转角，单位 0.1 度。
+   正值表示左转，负值表示右转；wheel_track_mm 为左右轮中心距。 */
+int32_t Encoder_GetRotationDeg10(uint16_t wheel_track_mm);
 
 void    Encoder_Reset(Motor_ID motor);
 void    Encoder_ResetAll(void);

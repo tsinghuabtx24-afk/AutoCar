@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/car.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/encoder.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/retarget.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/line_tracker.c
 )
 
 # Add include paths

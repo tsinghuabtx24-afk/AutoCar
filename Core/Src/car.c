@@ -23,7 +23,11 @@
 /* Private function prototypes -----------------------------------------------*/
 static uint8_t Car_ToEff(uint8_t speed);
 static int16_t Car_EffToDuty(int16_t eff);
+static uint16_t Car_AngleCompX1000(uint8_t speed, uint16_t radius_mm,
+                                   int8_t direction);
 static void Car_RunDistance(uint8_t speed, uint32_t distance_mm, int8_t direction);
+static void Car_RunAngle(uint8_t speed, uint16_t radius_mm,
+                         uint32_t angle_deg10, int8_t direction);
 
 /* Private functions ---------------------------------------------------------*/
 
@@ -94,6 +98,47 @@ static int16_t Car_EffToDuty(int16_t eff)
   mag = (int16_t)(mag + (int16_t)CAR_SPEED_BASE);
 
   return (eff >= 0) ? mag : (int16_t)(-mag);
+}
+
+/**
+  * @brief  获取角度动作的编码器目标放大系数
+  * @retval 千分比系数，1000 表示不补偿
+  */
+static uint16_t Car_AngleCompX1000(uint8_t speed, uint16_t radius_mm,
+                                   int8_t direction)
+{
+#if CAR_ANGLE_COMP_ENABLE
+  if (radius_mm != 0U)
+  {
+    return (direction > 0) ? CAR_TURN_LEFT_COMP_X1000
+                           : CAR_TURN_RIGHT_COMP_X1000;
+  }
+
+  if (speed <= 70U)
+  {
+    return CAR_ROT_COMP_70_X1000;
+  }
+  if (speed <= 80U)
+  {
+        return (uint16_t)((int32_t)CAR_ROT_COMP_70_X1000
+                      + ((int32_t)CAR_ROT_COMP_80_X1000
+                         - (int32_t)CAR_ROT_COMP_70_X1000)
+                        * (int32_t)(speed - 70U) / 10L);
+  }
+  if (speed < 100U)
+  {
+        return (uint16_t)((int32_t)CAR_ROT_COMP_80_X1000
+                      + ((int32_t)CAR_ROT_COMP_100_X1000
+                         - (int32_t)CAR_ROT_COMP_80_X1000)
+                        * (int32_t)(speed - 80U) / 20L);
+  }
+  return CAR_ROT_COMP_100_X1000;
+#else
+  (void)speed;
+  (void)radius_mm;
+  (void)direction;
+  return 1000U;
+#endif
 }
 
 /**
@@ -206,7 +251,126 @@ static void Car_RunDistance(uint8_t speed, uint32_t distance_mm, int8_t directio
          (long)Encoder_GetDistanceAvg());
 }
 
-/* Exported functions --------------------------------------------------------*/
+static void Car_RunAngle(uint8_t speed, uint16_t radius_mm,
+                         uint32_t angle_deg10, int8_t direction)
+{
+  int16_t outer;
+  int16_t inner;
+    int16_t left;
+  int16_t right;
+  uint32_t start_tick;
+  uint32_t last_report_tick;
+  uint32_t encoder_target_deg10;
+  uint16_t comp_x1000;
+
+  if (angle_deg10 == 0U)
+  {
+    Motor_BrakeAll();
+    return;
+  }
+
+#if CAR_ANGLE_COMP_ENABLE
+    if ((radius_mm == 0U) && (speed < CAR_ANGLE_MIN_SPEED))
+  {
+    printf("[ANGLE] rejected: speed %u < calibrated minimum %u\r\n",
+           (unsigned)speed, (unsigned)CAR_ANGLE_MIN_SPEED);
+    Motor_BrakeAll();
+    return;
+  }
+#endif
+
+  outer = (int16_t)Car_ToEff(speed);
+  if (outer == 0)
+  {
+    Motor_BrakeAll();
+    return;
+  }
+
+      if (radius_mm == 0U)
+  {
+    /* 原地旋转：左右轮等速反向。 */
+    inner = (int16_t)(-outer);
+  }
+  else if (radius_mm <= CAR_RADIUS_MIN_MM)
+  {
+    /* 绕内侧轮旋转，内侧轮停止。 */
+    inner = 0;
+  }
+  else
+  {
+    inner = Car_InnerSpeed((uint8_t)outer, radius_mm);
+  }
+
+      if (direction > 0)
+  {
+    left  = inner;
+    right = outer;
+  }
+  else
+  {
+    left  = outer;
+    right = inner;
+  }
+
+  comp_x1000 = Car_AngleCompX1000(speed, radius_mm, direction);
+  encoder_target_deg10 = (uint32_t)(((uint64_t)angle_deg10 * comp_x1000
+                                      + 500ULL) / 1000ULL);
+
+  Encoder_ResetAll();
+  start_tick = HAL_GetTick();
+  last_report_tick = start_tick;
+  printf("[ANGLE] start dir=%s real=%lu.%01lu deg encoder=%lu.%01lu deg "
+         "comp=%u.%03u radius=%umm speed=%u\r\n",
+         (direction > 0) ? "left" : "right",
+         (unsigned long)(angle_deg10 / 10U),
+         (unsigned long)(angle_deg10 % 10U),
+         (unsigned long)(encoder_target_deg10 / 10U),
+         (unsigned long)(encoder_target_deg10 % 10U),
+         (unsigned)(comp_x1000 / 1000U),
+         (unsigned)(comp_x1000 % 1000U),
+         (unsigned)radius_mm,
+         (unsigned)speed);
+  Car_Drive(left, right);
+
+  while (1)
+  {
+    uint32_t now = HAL_GetTick();
+    int32_t angle = Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM);
+    uint32_t turned = (angle >= 0)
+                        ? (uint32_t)angle
+                        : (uint32_t)(-(int64_t)angle);
+
+    if (turned >= encoder_target_deg10)
+    {
+      break;
+    }
+    if ((uint32_t)(now - start_tick) >= CAR_DISTANCE_TIMEOUT_MS)
+    {
+      printf("[ANGLE] timeout\r\n");
+      break;
+    }
+    if ((uint32_t)(now - last_report_tick) >= 500U)
+    {
+      last_report_tick = now;
+      printf("[ANGLE %lums] left=%ldmm right=%ldmm angle=%ld.%01lddeg\r\n",
+             (unsigned long)(now - start_tick),
+             (long)Encoder_GetDistanceLeft(),
+             (long)Encoder_GetDistanceRight(),
+             (long)(angle / 10),
+             (long)(angle >= 0 ? angle % 10 : -angle % 10));
+    }
+    HAL_Delay(1U);
+  }
+
+  Motor_BrakeAll();
+  printf("[ANGLE] stop left=%ldmm right=%ldmm angle=%ld.%01lddeg\r\n",
+         (long)Encoder_GetDistanceLeft(),
+         (long)Encoder_GetDistanceRight(),
+         (long)(Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM) / 10),
+         (long)(Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM) >= 0
+                  ? Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM) % 10
+                  : -Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM) % 10));
+}
 
 /**
   * @brief  小车运动控制初始化
@@ -240,6 +404,23 @@ void Car_Backward(uint8_t speed, uint16_t time)
   int16_t v = (int16_t)Car_ToEff(speed);
   Car_Drive((int16_t)(-v), (int16_t)(-v));
   Car_RunFor(time);
+}
+
+/**
+  * @brief  非阻塞式前进，供循迹等周期控制使用
+  */
+void Car_ForwardRun(uint8_t speed)
+{
+  int16_t v = (int16_t)Car_ToEff(speed);
+  Car_Drive(v, v);
+}
+
+/**
+  * @brief  立即制动
+  */
+void Car_Stop(void)
+{
+  Motor_BrakeAll();
 }
 
 /**
@@ -349,6 +530,40 @@ void Car_RotateRight(uint8_t speed, uint16_t time)
   int16_t v = (int16_t)Car_ToEff(speed);
   Car_Drive(v, (int16_t)(-v));
   Car_RunFor(time);
+}
+
+/**
+  * @brief  按编码器角度原地左转
+  * @param  speed:      速度百分比 0~100
+  * @param  angle_deg10:目标角度，单位 0.1 度，例如 900=90.0 度
+  */
+void Car_RotateLeftAngle(uint8_t speed, uint32_t angle_deg10)
+{
+  Car_RunAngle(speed, 0U, angle_deg10, 1);
+}
+
+/**
+  * @brief  按编码器角度原地右转
+  */
+void Car_RotateRightAngle(uint8_t speed, uint32_t angle_deg10)
+{
+  Car_RunAngle(speed, 0U, angle_deg10, -1);
+}
+
+/**
+  * @brief  按编码器角度左转指定半径圆弧
+  */
+void Car_TurnLeftAngle(uint8_t speed, uint16_t radius_mm, uint32_t angle_deg10)
+{
+  Car_RunAngle(speed, radius_mm, angle_deg10, 1);
+}
+
+/**
+  * @brief  按编码器角度右转指定半径圆弧
+  */
+void Car_TurnRightAngle(uint8_t speed, uint16_t radius_mm, uint32_t angle_deg10)
+{
+  Car_RunAngle(speed, radius_mm, angle_deg10, -1);
 }
 
 /**

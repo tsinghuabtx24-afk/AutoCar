@@ -86,11 +86,33 @@ extern "C" {
    防止因编码器接线或参数错误导致小车一直运行。 */
 #define CAR_DISTANCE_TIMEOUT_MS  60000U
 
+/* ==== 编码器角度滑移补偿 ====================================================
+   轮胎原地旋转和差速转弯时存在横向滑移，编码器计算角度会明显大于车体真实
+   转角，而且误差随 PWM、电量、地面和轮胎变化。对外接口仍传真实目标角度，
+   内部把它放大为编码器停止角度。
+
+   将来更换麦克纳姆轮或改用 IMU 航向闭环时，把 CAR_ANGLE_COMP_ENABLE 设为 0
+   即可完全关闭本补偿；所有系数以千分比表示，1000=1.000 倍。
+   ============================================================================ */
+#define CAR_ANGLE_COMP_ENABLE       1U
+#define CAR_ANGLE_MIN_SPEED         70U
+
+/* 原地旋转实测标定点：指令 90° 时，70/80/100 分别约转 40°/41°/45°。 */
+#define CAR_ROT_COMP_70_X1000       2250U
+#define CAR_ROT_COMP_80_X1000       2195U
+#define CAR_ROT_COMP_100_X1000      2000U
+
+/* 半径转弯仅有 100 PWM 标定数据：左转约 45°，右转约 30°。 */
+#define CAR_TURN_LEFT_COMP_X1000    2200U
+#define CAR_TURN_RIGHT_COMP_X1000   3000U
+
 /* Exported functions prototypes ---------------------------------------------*/
 void Car_Init(void);
 
 void Car_Forward(uint8_t speed, uint16_t time);
 void Car_Backward(uint8_t speed, uint16_t time);
+void Car_ForwardRun(uint8_t speed);
+void Car_Stop(void);
 void Car_ForwardDistance(uint8_t speed, uint32_t distance_mm);
 void Car_BackwardDistance(uint8_t speed, uint32_t distance_mm);
 void Car_ForwardVary(uint8_t speed_from, uint8_t speed_to, uint16_t time);
@@ -98,6 +120,10 @@ void Car_TurnLeft(uint8_t speed, uint16_t radius_mm, uint16_t time);
 void Car_TurnRight(uint8_t speed, uint16_t radius_mm, uint16_t time);
 void Car_RotateLeft(uint8_t speed, uint16_t time);
 void Car_RotateRight(uint8_t speed, uint16_t time);
+void Car_RotateLeftAngle(uint8_t speed, uint32_t angle_deg10);
+void Car_RotateRightAngle(uint8_t speed, uint32_t angle_deg10);
+void Car_TurnLeftAngle(uint8_t speed, uint16_t radius_mm, uint32_t angle_deg10);
+void Car_TurnRightAngle(uint8_t speed, uint16_t radius_mm, uint32_t angle_deg10);
 void Car_Brake(uint16_t time);
 
 void Car_Clover(uint8_t speed, uint16_t radius_mm, uint16_t leaf_time);

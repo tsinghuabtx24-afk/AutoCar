@@ -85,7 +85,7 @@ void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(TRIG_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : ECHO_Pin X1_Pin X2_Pin X3_Pin */
+      /*Configure GPIO pins : ECHO_Pin X1_Pin X2_Pin X3_Pin */
   GPIO_InitStruct.Pin = ECHO_Pin|X1_Pin|X2_Pin|X3_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
