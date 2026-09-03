@@ -95,7 +95,7 @@ extern "C" {
    即可完全关闭本补偿；所有系数以千分比表示，1000=1.000 倍。
    ============================================================================ */
 #define CAR_ANGLE_COMP_ENABLE       1U
-#define CAR_ANGLE_MIN_SPEED         70U
+#define CAR_ANGLE_MIN_SPEED         55U
 
 /* 原地旋转实测标定点：指令 90° 时，70/80/100 分别约转 40°/41°/45°。 */
 #define CAR_ROT_COMP_70_X1000       2250U

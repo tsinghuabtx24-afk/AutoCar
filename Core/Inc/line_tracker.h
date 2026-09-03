@@ -23,7 +23,8 @@ extern "C" {
 #define LINE_WHITE_LEVEL         GPIO_PIN_SET
 
 /* 运动参数，均可直接修改。速度为现有 Car 模块的 0~100 刻度。 */
-#define LINE_FORWARD_SPEED       70U
+#define LINE_FORWARD_SPEED       60U
+#define LINE_TURN_SPEED          90U
 #define LINE_CORRECT_ANGLE_DEG10 50U   /* 5.0 度，单位 0.1 度 */
 #define LINE_SAMPLE_PERIOD_MS    10U
 

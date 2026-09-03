@@ -52,17 +52,23 @@ void LineTracker_Step(void)
       break;
     case 0x01U: /* 0001：按约定微右偏，向左修正 5° */
     case 0x0BU: /* 1011：按约定微右偏，向左修正 5° */
-      Car_RotateLeftAngle(LINE_FORWARD_SPEED, LINE_CORRECT_ANGLE_DEG10);
+      Car_RotateLeftAngle(LINE_TURN_SPEED, LINE_CORRECT_ANGLE_DEG10);
       break;
     case 0x03U: /* 0011：轨迹右端，向左修正 10° */
-      Car_RotateLeftAngle(LINE_FORWARD_SPEED, 2 * LINE_CORRECT_ANGLE_DEG10);
+      Car_RotateLeftAngle(LINE_TURN_SPEED, 2 * LINE_CORRECT_ANGLE_DEG10);
+      break;
+    case 0x07U: /* 0111：轨迹极右，向左修正 15° */
+      Car_RotateLeftAngle(LINE_TURN_SPEED, 3 * LINE_CORRECT_ANGLE_DEG10);
       break;
     case 0x08U: /* 1000：按约定微左偏，向右修正 5° */
     case 0x0DU: /* 1101：按约定微左偏，向右修正 5° */
-      Car_RotateRightAngle(LINE_FORWARD_SPEED, LINE_CORRECT_ANGLE_DEG10);
+      Car_RotateRightAngle(LINE_TURN_SPEED, LINE_CORRECT_ANGLE_DEG10);
       break;
     case 0x0CU: /* 1100：轨迹左端，向右修正 10° */
-      Car_RotateRightAngle(LINE_FORWARD_SPEED, 2 * LINE_CORRECT_ANGLE_DEG10);
+      Car_RotateRightAngle(LINE_TURN_SPEED, 2 * LINE_CORRECT_ANGLE_DEG10);
+      break;
+    case 0x0EU: /* 1110：轨迹极左，向右修正 15° */
+      Car_RotateRightAngle(LINE_TURN_SPEED, 3 * LINE_CORRECT_ANGLE_DEG10);
       break;
     default:
 #if LINE_STOP_ON_UNKNOWN

@@ -18,6 +18,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "adc.h"
 #include "i2c.h"
 #include "tim.h"
 #include "usart.h"
@@ -27,6 +28,7 @@
 /* USER CODE BEGIN Includes */
 #include "car.h"
 #include "encoder.h"
+#include "ir_avoid.h"
 #include "line_tracker.h"
 #include "retarget.h"
 
@@ -188,13 +190,14 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
+  MX_ADC3_Init();
   MX_TIM1_Init();
   MX_TIM8_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM4_Init();
   MX_TIM5_Init();
-  MX_USART1_UART_Init();
+    MX_USART1_UART_Init();
   MX_I2C1_Init();
   /* USER CODE BEGIN 2 */
 
@@ -218,6 +221,7 @@ int main(void)
        Encoder_GetDistanceAvg()    车体里程 mm
        Encoder_GetSpeedRpm(...)    轮子转速 rpm */
   Encoder_Init();
+  IrAvoid_Init();
 
   /* USER CODE END 2 */
 
@@ -245,10 +249,12 @@ int main(void)
     // Car_TurnRightAngle(100U, 150U, 3600U); /* 半径 150mm 右转 90.0° */
     
 
-    /* 四路红外黑线循迹（测试时取消注释，并注释掉上面的运动测试） */
-    LineTracker_Run();
-    
-    Encoder_PrintStatus();
+         /* 红外避障诊断：每 20ms 采样，串口输出左右原始 ADC 与状态 */
+    IrAvoid_Update();
+    HAL_Delay(1U);
+
+    /* 四路红外黑线循迹（需要循迹时取消注释，并注释上面的避障诊断） */
+    // LineTracker_Run();
 
     /* 变速直线：先加速再减速，走一个梭形速度曲线 */
     // RGB_SetColor(0, 0, 1);                      /* 蓝色 - 正在变速直线 */
@@ -269,6 +275,7 @@ void SystemClock_Config(void)
 {
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
+  RCC_PeriphCLKInitTypeDef PeriphClkInit = {0};
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
@@ -279,7 +286,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSIState = RCC_HSI_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL9;
+  RCC_OscInitStruct.PLL.PLLMUL = RCC_PLL_MUL2;
   if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
   {
     Error_Handler();
@@ -294,7 +301,13 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_0) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  PeriphClkInit.PeriphClockSelection = RCC_PERIPHCLK_ADC;
+  PeriphClkInit.AdcClockSelection = RCC_ADCPCLK2_DIV2;
+  if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInit) != HAL_OK)
   {
     Error_Handler();
   }
