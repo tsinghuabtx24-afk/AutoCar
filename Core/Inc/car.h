@@ -82,11 +82,17 @@ extern "C" {
 #define CLOVER_TURN_SPEED      100U   /* 叶片之间原地转向的速度 */
 #define CLOVER_TURN_MS         420U   /* 原地转 120° 所需时间，待标定 */
 
+/* 按编码器距离运动的异常保护时间。编码器没有脉冲时到期自动制动，
+   防止因编码器接线或参数错误导致小车一直运行。 */
+#define CAR_DISTANCE_TIMEOUT_MS  60000U
+
 /* Exported functions prototypes ---------------------------------------------*/
 void Car_Init(void);
 
 void Car_Forward(uint8_t speed, uint16_t time);
 void Car_Backward(uint8_t speed, uint16_t time);
+void Car_ForwardDistance(uint8_t speed, uint32_t distance_mm);
+void Car_BackwardDistance(uint8_t speed, uint32_t distance_mm);
 void Car_ForwardVary(uint8_t speed_from, uint8_t speed_to, uint16_t time);
 void Car_TurnLeft(uint8_t speed, uint16_t radius_mm, uint16_t time);
 void Car_TurnRight(uint8_t speed, uint16_t radius_mm, uint16_t time);

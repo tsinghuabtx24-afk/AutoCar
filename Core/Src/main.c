@@ -117,6 +117,45 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 
 /* 电机与小车运动函数分别位于 tim.c 和 car.c */
 
+/**
+  * @brief  周期输出四个轮子的编码器诊断数据
+  * @note   放在主循环中调用，不能放到 SysTick 中断里，否则阻塞式串口发送
+  *         会影响系统时基和编码器采样。
+  */
+static void Encoder_PrintStatus(void)
+{
+  static uint32_t last_report_tick = 0U;
+  uint32_t now = HAL_GetTick();
+
+  if ((uint32_t)(now - last_report_tick) < 500U)
+  {
+    return;
+  }
+  last_report_tick = now;
+
+  printf("[ENC %lums] M1: count=%ld distance=%ldmm rpm=%d\r\n",
+         (unsigned long)now,
+         (long)Encoder_GetCount(MOTOR_1),
+         (long)Encoder_GetDistance(MOTOR_1),
+         (int)Encoder_GetSpeedRpm(MOTOR_1));
+  printf("             M2: count=%ld distance=%ldmm rpm=%d\r\n",
+         (long)Encoder_GetCount(MOTOR_2),
+         (long)Encoder_GetDistance(MOTOR_2),
+         (int)Encoder_GetSpeedRpm(MOTOR_2));
+  printf("             M3: count=%ld distance=%ldmm rpm=%d\r\n",
+         (long)Encoder_GetCount(MOTOR_3),
+         (long)Encoder_GetDistance(MOTOR_3),
+         (int)Encoder_GetSpeedRpm(MOTOR_3));
+  printf("             M4: count=%ld distance=%ldmm rpm=%d\r\n",
+         (long)Encoder_GetCount(MOTOR_4),
+         (long)Encoder_GetDistance(MOTOR_4),
+         (int)Encoder_GetSpeedRpm(MOTOR_4));
+  printf("             avg=%ldmm left=%ldmm right=%ldmm\r\n",
+         (long)Encoder_GetDistanceAvg(),
+         (long)Encoder_GetDistanceLeft(),
+         (long)Encoder_GetDistanceRight());
+}
+
 /* USER CODE END 0 */
 
 /**
@@ -189,6 +228,15 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+    /* 按编码器距离运动示例（需要测试时取消对应注释） */
+    Car_ForwardDistance(70U, 1000U);    /* 前进 200mm 后制动 */
+    HAL_Delay(10000U);
+    Car_BackwardDistance(70U, 1000U);   /* 后退 200mm 后制动 */
+    HAL_Delay(10000U);
+
+    /* 编码器诊断：每 500ms 输出四轮计数、里程和 RPM */
+    Encoder_PrintStatus();
 
     /* 变速直线：先加速再减速，走一个梭形速度曲线 */
     // RGB_SetColor(0, 0, 1);                      /* 蓝色 - 正在变速直线 */

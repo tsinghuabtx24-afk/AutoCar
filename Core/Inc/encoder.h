@@ -61,8 +61,8 @@ extern "C" {
    得到 measured，则填 ENC_CAL_NUM=1000、ENC_CAL_DEN=measured。
    用整数分数而不是 float，是因为 F103 没有硬件 FPU。
    ============================================================================ */
-#define ENC_CAL_NUM          1L
-#define ENC_CAL_DEN          1L
+#define ENC_CAL_NUM          5L
+#define ENC_CAL_DEN          7L
 
 /* ==== 计数方向补偿 ==========================================================
    编码器计数的正方向由 A/B 相接线和电机安装朝向共同决定，和车体前进方向
@@ -71,10 +71,10 @@ extern "C" {
    标定方法：让车前进，四个 Encoder_GetCount() 应该**全为正**。
    哪个是负的，就把对应的宏取反。
    ============================================================================ */
-#define ENC_POLARITY_M1      (-1)   /* 左前 */
-#define ENC_POLARITY_M2      (-1)   /* 左后 */
-#define ENC_POLARITY_M3      (1)    /* 右前 */
-#define ENC_POLARITY_M4      (1)    /* 右后 */
+#define ENC_POLARITY_M1      (1)   /* 左前 */
+#define ENC_POLARITY_M2      (1)   /* 左后 */
+#define ENC_POLARITY_M3      (-1)    /* 右前 */
+#define ENC_POLARITY_M4      (-1)    /* 右后 */
 
 /* 转速计算的最小采样间隔 ms。间隔太短则一个周期内脉冲数太少，转速值会
    跳得很厉害；太长则响应迟钝。20ms 时 100rpm 下约有 17 个计数（x2 倍频），

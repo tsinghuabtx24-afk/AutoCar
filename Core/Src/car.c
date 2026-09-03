@@ -7,16 +7,23 @@
 
 /* Includes ------------------------------------------------------------------*/
 #include "car.h"
+#include "encoder.h"
+
+#include <stdio.h>
 
 /* Private define ------------------------------------------------------------*/
-/* 电机接线极性补偿：左侧（M1/M2）实测转向与右侧（M3/M4）相反，故取 -1。
-   若整车前后方向相反，把下面两个宏同时取反。 */
-#define CAR_LEFT_POLARITY    (-1)
-#define CAR_RIGHT_POLARITY   (1)
+/* 左右两侧电机镜像安装，因此两侧底层极性相反。 */
+#define CAR_LEFT_POLARITY          (1)
+#define CAR_RIGHT_POLARITY         (-1)
+
+/* 整车前进方向补偿。根据最新实车测试，Car_Drive() 的正输入需要整体取反
+   才对应物理车头方向。以后只调整这一项，不再同时改多个方向参数。 */
+#define CAR_FORWARD_POLARITY       (-1)
 
 /* Private function prototypes -----------------------------------------------*/
 static uint8_t Car_ToEff(uint8_t speed);
 static int16_t Car_EffToDuty(int16_t eff);
+static void Car_RunDistance(uint8_t speed, uint32_t distance_mm, int8_t direction);
 
 /* Private functions ---------------------------------------------------------*/
 
@@ -33,10 +40,14 @@ static void Car_Drive(int16_t left, int16_t right)
   int16_t dl = Car_EffToDuty(left);
   int16_t dr = Car_EffToDuty(right);
 
-  Motor_SetSpeedRaw(MOTOR_1, (int8_t)(CAR_LEFT_POLARITY  * dl));
-  Motor_SetSpeedRaw(MOTOR_2, (int8_t)(CAR_LEFT_POLARITY  * dl));
-  Motor_SetSpeedRaw(MOTOR_3, (int8_t)(CAR_RIGHT_POLARITY * dr));
-  Motor_SetSpeedRaw(MOTOR_4, (int8_t)(CAR_RIGHT_POLARITY * dr));
+    Motor_SetSpeedRaw(MOTOR_1,
+                    (int8_t)(CAR_FORWARD_POLARITY * CAR_LEFT_POLARITY * dl));
+  Motor_SetSpeedRaw(MOTOR_2,
+                    (int8_t)(CAR_FORWARD_POLARITY * CAR_LEFT_POLARITY * dl));
+  Motor_SetSpeedRaw(MOTOR_3,
+                    (int8_t)(CAR_FORWARD_POLARITY * CAR_RIGHT_POLARITY * dr));
+  Motor_SetSpeedRaw(MOTOR_4,
+                    (int8_t)(CAR_FORWARD_POLARITY * CAR_RIGHT_POLARITY * dr));
 }
 
 /**
@@ -122,6 +133,79 @@ static void Car_RunFor(uint16_t time)
   Motor_BrakeAll();
 }
 
+/**
+  * @brief  按编码器里程直线运行
+  * @param  speed:       占空比刻度 0~100
+  * @param  distance_mm: 目标距离 mm
+  * @param  direction:   1=前进，-1=后退
+  * @note   此函数为阻塞式；Encoder_Update() 由 SysTick 持续执行，所以等待
+  *         期间编码器仍会正常累计。到达目标或超时后使用能耗制动停车。
+  */
+static void Car_RunDistance(uint8_t speed, uint32_t distance_mm, int8_t direction)
+{
+  int16_t v = (int16_t)Car_ToEff(speed);
+  uint32_t start_tick;
+  uint32_t last_report_tick;
+
+  if ((v == 0) || (distance_mm == 0U))
+  {
+    Motor_BrakeAll();
+    return;
+  }
+
+  Encoder_ResetAll();
+  start_tick = HAL_GetTick();
+  last_report_tick = start_tick;
+  printf("[DIST] start dir=%s target=%lumm speed=%u\r\n",
+         (direction > 0) ? "forward" : "backward",
+         (unsigned long)distance_mm,
+         (unsigned)speed);
+  Car_Drive((int16_t)(direction * v), (int16_t)(direction * v));
+
+  while (1)
+  {
+    uint32_t now = HAL_GetTick();
+    int32_t distance = Encoder_GetDistanceAvg();
+    uint32_t travelled = (distance >= 0)
+                           ? (uint32_t)distance
+                           : (uint32_t)(-(int64_t)distance);
+
+    if (travelled >= distance_mm)
+    {
+      break;
+    }
+    if ((uint32_t)(now - start_tick) >= CAR_DISTANCE_TIMEOUT_MS)
+    {
+      printf("[DIST] timeout\r\n");
+      break;
+    }
+    if ((uint32_t)(now - last_report_tick) >= 500U)
+    {
+      last_report_tick = now;
+      printf("[DIST %lums] count=%ld,%ld,%ld,%ld avg=%ldmm rpm=%d,%d,%d,%d\r\n",
+             (unsigned long)(now - start_tick),
+             (long)Encoder_GetCount(MOTOR_1),
+             (long)Encoder_GetCount(MOTOR_2),
+             (long)Encoder_GetCount(MOTOR_3),
+             (long)Encoder_GetCount(MOTOR_4),
+             (long)distance,
+             (int)Encoder_GetSpeedRpm(MOTOR_1),
+             (int)Encoder_GetSpeedRpm(MOTOR_2),
+             (int)Encoder_GetSpeedRpm(MOTOR_3),
+             (int)Encoder_GetSpeedRpm(MOTOR_4));
+    }
+    HAL_Delay(1U);
+  }
+
+  Motor_BrakeAll();
+  printf("[DIST] stop count=%ld,%ld,%ld,%ld avg=%ldmm\r\n",
+         (long)Encoder_GetCount(MOTOR_1),
+         (long)Encoder_GetCount(MOTOR_2),
+         (long)Encoder_GetCount(MOTOR_3),
+         (long)Encoder_GetCount(MOTOR_4),
+         (long)Encoder_GetDistanceAvg());
+}
+
 /* Exported functions --------------------------------------------------------*/
 
 /**
@@ -156,6 +240,26 @@ void Car_Backward(uint8_t speed, uint16_t time)
   int16_t v = (int16_t)Car_ToEff(speed);
   Car_Drive((int16_t)(-v), (int16_t)(-v));
   Car_RunFor(time);
+}
+
+/**
+  * @brief  前进指定距离后制动
+  * @param  speed:       速度百分比 0~100，必须大于 CAR_SPEED_BASE
+  * @param  distance_mm: 目标距离 mm
+  */
+void Car_ForwardDistance(uint8_t speed, uint32_t distance_mm)
+{
+  Car_RunDistance(speed, distance_mm, 1);
+}
+
+/**
+  * @brief  后退指定距离后制动
+  * @param  speed:       速度百分比 0~100，必须大于 CAR_SPEED_BASE
+  * @param  distance_mm: 目标距离 mm
+  */
+void Car_BackwardDistance(uint8_t speed, uint32_t distance_mm)
+{
+  Car_RunDistance(speed, distance_mm, -1);
 }
 
 /**
