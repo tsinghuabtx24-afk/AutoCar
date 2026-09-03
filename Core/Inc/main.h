@@ -73,6 +73,10 @@ void RGB_SetColor(uint8_t r, uint8_t g, uint8_t b);
 #define H3A_GPIO_Port GPIOA
 #define H3B_Pin GPIO_PIN_1
 #define H3B_GPIO_Port GPIOA
+#define TRIG_Pin GPIO_PIN_11
+#define TRIG_GPIO_Port GPIOF
+#define ECHO_Pin GPIO_PIN_12
+#define ECHO_GPIO_Port GPIOF
 #define X1_Pin GPIO_PIN_13
 #define X1_GPIO_Port GPIOF
 #define X2_Pin GPIO_PIN_14
@@ -118,6 +122,9 @@ void RGB_SetColor(uint8_t r, uint8_t g, uint8_t b);
 #define M2B_GPIO_Port GPIOC
 #define H2A_Pin GPIO_PIN_15
 #define H2A_GPIO_Port GPIOA
+#define IR_IN_Pin GPIO_PIN_11
+#define IR_IN_GPIO_Port GPIOG
+#define IR_IN_EXTI_IRQn EXTI15_10_IRQn
 #define Buzzer_Pin GPIO_PIN_12
 #define Buzzer_GPIO_Port GPIOG
 #define led1_Pin GPIO_PIN_14
