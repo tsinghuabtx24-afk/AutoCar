@@ -260,6 +260,7 @@ int main(void)
   ManualTask_Init();
   UltrasonicSense_Init();
   AvoidTask_Init();
+  LineTracker_Init();
   Scheduler_Init();
 
   /* USER CODE END 2 */
@@ -273,20 +274,7 @@ int main(void)
 
     /* USER CODE BEGIN 3 */
 
-    /* 按编码器距离运动示例（需要测试时取消对应注释） */
-    // Car_ForwardDistance(70U, 1000U);    /* 前进 200mm 后制动 */
-    // HAL_Delay(10000U);
-    // Car_BackwardDistance(70U, 1000U);   /* 后退 200mm 后制动 */
-    // HAL_Delay(10000U);
-    // HAL_Delay(3000U);
-    // Car_RotateLeftAngle(100U, 1800U);       /* 原地左转 90.0° */
-    // HAL_Delay(2000U);
-    // Car_RotateRightAngle(100U, 1800U);      /* 原地右转 90.0° */
-    // HAL_Delay(2000U);
-    // Car_TurnLeftAngle(100U, 150U, 3600U);  /* 半径 150mm 左转 90.0° */
-    // HAL_Delay(2000U);
-    // Car_TurnRightAngle(100U, 150U, 3600U); /* 半径 150mm 右转 90.0° */
-    
+
 
     /* ==== 正式主循环：采样 → 调度 → 分派 → 诊断 ====================
        循环里没有 HAL_Delay，每轮都能重新仲裁优先级。同一周期只有
@@ -296,8 +284,8 @@ int main(void)
           遥控必须每轮采样——RED 双击是进入手动模式的唯一入口。
           视觉帧由 UART2 中断直接投递事件，这里无需轮询。 */
     ManualTask_Sense();
-    IrAvoid_Sense();
-    UltrasonicSense_Sense();
+    // IrAvoid_Sense();
+    // UltrasonicSense_Sense();
 
     /* 2. 调度层：消费事件，决定控制模式。 */
     Scheduler_DrainEvents();
@@ -330,6 +318,21 @@ int main(void)
                (unsigned long)Event_GetDroppedCount());
       }
     }
+
+
+    /* 按编码器距离运动示例（需要测试时取消对应注释） */
+    // Car_ForwardDistance(70U, 1000U);    /* 前进 200mm 后制动 */
+    // HAL_Delay(10000U);
+    // Car_BackwardDistance(70U, 1000U);   /* 后退 200mm 后制动 */
+    // HAL_Delay(10000U);
+    // HAL_Delay(3000U);
+    // Car_RotateLeftAngle(100U, 1800U);       /* 原地左转 90.0° */
+    // HAL_Delay(2000U);
+    // Car_RotateRightAngle(100U, 1800U);      /* 原地右转 90.0° */
+    // HAL_Delay(2000U);
+    // Car_TurnLeftAngle(100U, 150U, 3600U);  /* 半径 150mm 左转 90.0° */
+    // HAL_Delay(2000U);
+    // Car_TurnRightAngle(100U, 150U, 3600U); /* 半径 150mm 右转 90.0° */
 
     /* 超声波避障已并入 avoid_task（阶段 4），正式路径由调度器驱动。
        旧的 UltrasonicAvoid_Handle() 保留为独立调试入口，但它直写 RGB 和

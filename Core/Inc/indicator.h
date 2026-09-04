@@ -51,13 +51,29 @@ typedef enum
 #define INDICATOR_BLINK_FAST_MS   150U
 #define INDICATOR_BLINK_SLOW_MS   400U
 
+/* 点鸣模式的一声时长与间隔。 */
+#define INDICATOR_BEEP_ON_MS      120U
+#define INDICATOR_BEEP_GAP_MS     100U
+
+/* buzzer 参数的取值。持续鸣叫用 INDICATOR_BUZZER_ON，
+   叫固定几声后自动静音用 INDICATOR_BEEPS(n)。 */
+#define INDICATOR_BUZZER_OFF      0U
+#define INDICATOR_BUZZER_ON       0xFFU
+#define INDICATOR_BEEPS(n)        ((uint8_t)(n))
+
 void Indicator_Init(void);
 
 /*
  * 提交一个指示申请。同一优先级重复申请会覆盖上一次。
- * buzzer:   1=鸣，0=静
+ *
+ * buzzer:   INDICATOR_BUZZER_OFF     静音
+ *           INDICATOR_BUZZER_ON      持续鸣叫直到 Release
+ *           INDICATOR_BEEPS(n)       叫 n 声后自动静音，灯继续按 blink_ms 闪
  * left/right: 两侧 RGB 颜色
  * blink_ms: 闪烁半周期，0=常亮
+ *
+ * 注意：重复提交同一优先级的**相同**参数不会重启点鸣计数，否则每轮主循环
+ * 都重新申请的话蜂鸣器会一直响。参数变化才重新起算。
  */
 void Indicator_Request(Indicator_Prio prio, uint8_t buzzer,
                        Indicator_Color left, Indicator_Color right,

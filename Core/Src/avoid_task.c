@@ -18,6 +18,7 @@ static AvoidTask_State avoid_state;
 static uint32_t avoid_start_tick;
 static uint32_t avoid_phase_tick;
 static uint8_t  avoid_attempts;
+static uint8_t  avoid_reverses;
 /* 本次转向方向：+1 左，-1 右。 */
 static int8_t   avoid_turn_dir;
 
@@ -40,6 +41,7 @@ void AvoidTask_Init(void)
 {
   avoid_state    = AVOID_IDLE;
   avoid_attempts = 0U;
+  avoid_reverses = 0U;
   avoid_turn_dir = 1;
 }
 
@@ -104,18 +106,12 @@ static void AvoidTask_StartAttempt(void)
 {
   IrAvoid_State ir = IrAvoid_GetState();
 
+  /* 不设上限：持续重试直到脱困。障碍是暂时的，失败不算故障。 */
   avoid_attempts++;
 
-  if (avoid_attempts > AVOID_MAX_ATTEMPTS)
-  {
-    printf("[AVOID] give up after %u attempts\r\n",
-           (unsigned)(avoid_attempts - 1U));
-    (void)Event_Post(EVENT_FAULT, 0U);
-    avoid_state = AVOID_FAILED;
-    return;
-  }
-
-  if (AvoidTask_NeedsReverse() != 0U)
+  /* 后退次数有上限，避免正对墙时反复倒退累计出很远的位移。 */
+  if ((AvoidTask_NeedsReverse() != 0U) &&
+      (avoid_reverses < AVOID_MAX_REVERSES))
   {
     if (Car_StartBackwardDistance(AVOID_REVERSE_SPEED,
                                   AVOID_REVERSE_DIST_MM) != CAR_ACTION_BUSY)
@@ -124,12 +120,25 @@ static void AvoidTask_StartAttempt(void)
       avoid_state = AVOID_FAILED;
       return;
     }
+    avoid_reverses++;
     AvoidTask_EnterPhase(AVOID_BACKING);
     return;
   }
 
-  /* 单侧受阻：往反方向轻推。左侧有障碍就右转，右侧有障碍就左转。 */
-  avoid_turn_dir = (ir == IR_AVOID_LEFT) ? -1 : 1;
+  /* 单侧受阻：往反方向轻推。左侧有障碍就右转，右侧有障碍就左转。
+     双侧受阻但后退次数已用尽时按读数择路，不能再靠"哪侧有障碍"判断。 */
+  if (ir == IR_AVOID_LEFT)
+  {
+    avoid_turn_dir = -1;
+  }
+  else if (ir == IR_AVOID_RIGHT)
+  {
+    avoid_turn_dir = 1;
+  }
+  else
+  {
+    avoid_turn_dir = AvoidTask_ChooseDirection();
+  }
   if (Car_StartRotateAngle(AVOID_ROTATE_SPEED,
                            (int32_t)avoid_turn_dir *
                            (int32_t)AVOID_NUDGE_DEG10) != CAR_ACTION_BUSY)
@@ -146,9 +155,11 @@ void AvoidTask_Begin(void)
   Car_ActionAbort();
   avoid_start_tick = HAL_GetTick();
   avoid_attempts   = 0U;
+  avoid_reverses   = 0U;
 
   /* 告警覆盖整个避障过程，结束时释放。左右侧红灯指示受阻方向。 */
-  Indicator_Request(INDICATOR_PRIO_AVOID, 1U,
+  /* 告警覆盖整个避障过程。蜂鸣持续——避障时车在动，需要持续提醒周围的人。 */
+  Indicator_Request(INDICATOR_PRIO_AVOID, INDICATOR_BUZZER_ON,
                     (IrAvoid_IsLeftBlocked()  != 0U) ? INDICATOR_RED : INDICATOR_OFF,
                     (IrAvoid_IsRightBlocked() != 0U) ? INDICATOR_RED : INDICATOR_OFF,
                     INDICATOR_BLINK_FAST_MS);
@@ -197,11 +208,12 @@ uint8_t AvoidTask_Step(void)
     return 0U;
   }
 
-  /* 总超时兜底，防止卡在某一相。 */
+  /* 总超时兜底，防止卡在某一相。**不报故障**：只是结束本轮，交还控制权。
+     障碍若仍在，传感器下一轮会重新触发避障，等于自动重来。 */
   if ((uint32_t)(now - avoid_start_tick) >= AVOID_TOTAL_TIMEOUT_MS)
   {
-    printf("[AVOID] total timeout\r\n");
-    (void)Event_Post(EVENT_FAULT, 0U);
+    printf("[AVOID] total timeout after %u attempts, hand back\r\n",
+           (unsigned)avoid_attempts);
     return AvoidTask_Finish(0U);
   }
 

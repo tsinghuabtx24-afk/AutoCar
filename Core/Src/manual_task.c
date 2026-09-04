@@ -177,6 +177,7 @@ void ManualTask_Step(void)
   /* 手动模式的指示：蓝灯常亮表示接管中，按 HORN 时加鸣笛。
      调度器在进入手动模式时已申请蓝灯，这里只更新蜂鸣位。 */
   Indicator_Request(INDICATOR_PRIO_MANUAL,
-                    (uint8_t)(manual_action == EVENT_REMOTE_HORN),
+                    (manual_action == EVENT_REMOTE_HORN) ? INDICATOR_BUZZER_ON
+                                                         : INDICATOR_BUZZER_OFF,
                     INDICATOR_BLUE, INDICATOR_BLUE, 0U);
 }

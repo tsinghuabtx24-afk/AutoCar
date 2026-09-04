@@ -25,7 +25,11 @@ static void VisionTask_Apply(void)
 
   /* 闪灯相位由任务自己按 task_phase 控制，所以这里 blink_ms 传 0（常亮），
      由 task_alert_on 的开关体现闪烁。 */
-  Indicator_Request(INDICATOR_PRIO_TASK, task_buzzer_on,
+  /* 鸣笛任务自己控制"响几声"的相位，所以这里用持续鸣叫，
+     由 task_buzzer_on 的开关体现节奏。 */
+  Indicator_Request(INDICATOR_PRIO_TASK,
+                    (task_buzzer_on != 0U) ? INDICATOR_BUZZER_ON
+                                           : INDICATOR_BUZZER_OFF,
                     (task_alert_on != 0U) ? INDICATOR_YELLOW : INDICATOR_OFF,
                     (task_alert_on != 0U) ? INDICATOR_YELLOW : INDICATOR_OFF,
                     0U);

@@ -31,6 +31,13 @@ static void Scheduler_SetMode(Control_Mode mode)
   printf("[SCHED] %s -> %s\r\n",
          Scheduler_ModeName(scheduler_mode), Scheduler_ModeName(mode));
   scheduler_mode = mode;
+
+  /* 重新获得循迹控制权时清掉内部状态：否则会带着被抢占前的原地转方向和
+     丢线计数继续，而车身姿态早已被避障或手动操作改变。 */
+  if (mode == CONTROL_LINE_TRACK)
+  {
+    LineTracker_Reset();
+  }
 }
 
 void Scheduler_Init(void)
@@ -77,8 +84,9 @@ static void Scheduler_EnterStop(void)
   scheduler_preempted = CONTROL_LINE_TRACK;
   Scheduler_SetMode(CONTROL_STOP);
 
-  /* 故障指示优先级最高，覆盖一切。 */
-  Indicator_Request(INDICATOR_PRIO_FAULT, 1U,
+  /* 故障指示优先级最高，覆盖一切。蜂鸣只叫两声就静音——急停可能持续很久，
+     一直响没有额外信息量。红灯慢闪持续提示状态。 */
+  Indicator_Request(INDICATOR_PRIO_FAULT, INDICATOR_BEEPS(2),
                     INDICATOR_RED, INDICATOR_RED, INDICATOR_BLINK_SLOW_MS);
 }
 
@@ -114,7 +122,7 @@ static void Scheduler_ToggleManual(void)
   Scheduler_SetMode(CONTROL_MANUAL);
 
   /* 手动接管用蓝灯常亮区分，不鸣笛。 */
-  Indicator_Request(INDICATOR_PRIO_MANUAL, 0U,
+  Indicator_Request(INDICATOR_PRIO_MANUAL, INDICATOR_BUZZER_OFF,
                     INDICATOR_BLUE, INDICATOR_BLUE, 0U);
 }
 
@@ -270,8 +278,8 @@ void Scheduler_Dispatch(void)
       break;
 
     case CONTROL_LINE_TRACK:
-      /* 当前独立测试阶段：按巡线速度直行。阶段 5 换成 LineTracker_Step()。 */
-      Car_ForwardRun(VisionTask_GetSpeed());
+      /* 默认行为：差速循迹。非阻塞，内部自己把住 10ms 控制周期。 */
+      LineTracker_Step();
       break;
 
     case CONTROL_IDLE:
