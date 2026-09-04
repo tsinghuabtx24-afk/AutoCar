@@ -83,12 +83,12 @@ static uint8_t LineTracker_Decode(uint8_t pattern, int8_t *level)
   {
     case 0x09U: *level =  0; return 1U;  /* 1001：轨迹中心 */
 
-    case 0x01U:                          /* 0001：微右偏 */
+    case 0x01U: *level =  3; return 4U;  /* 0001：微右偏或大右转信号，如今处理为大右转信号 */
     case 0x0BU: *level =  1; return 1U;  /* 1011：微右偏 */
     case 0x03U: *level =  2; return 1U;  /* 0011：轨迹右端 */
     case 0x07U: *level =  3; return 1U;  /* 0111：轨迹极右 */
 
-    case 0x08U:                          /* 1000：微左偏 */
+    case 0x08U: *level = -3; return 4U;  /* 1000：微左偏或大左转信号，如今处理为大左转信号 */
     case 0x0DU: *level = -1; return 1U;  /* 1101：微左偏 */
     case 0x0CU: *level = -2; return 1U;  /* 1100：轨迹左端 */
     case 0x0EU: *level = -3; return 1U;  /* 1110：轨迹极左 */
