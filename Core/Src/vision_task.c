@@ -1,5 +1,6 @@
 #include "vision_task.h"
 #include "car.h"
+#include "indicator.h"
 
 #include <stdio.h>
 
@@ -9,19 +10,42 @@ static uint32_t task_phase_tick;
 static uint8_t task_phase;
 static uint8_t task_speed;
 
+/* 当前的灯与蜂鸣申请状态。通过指示层申请而不是直写 GPIO，这样入库闪灯
+   不会再被红外的"无障碍则灭灯"覆盖。 */
+static uint8_t task_alert_on;
+static uint8_t task_buzzer_on;
+
+static void VisionTask_Apply(void)
+{
+  if ((task_alert_on == 0U) && (task_buzzer_on == 0U))
+  {
+    Indicator_Release(INDICATOR_PRIO_TASK);
+    return;
+  }
+
+  /* 闪灯相位由任务自己按 task_phase 控制，所以这里 blink_ms 传 0（常亮），
+     由 task_alert_on 的开关体现闪烁。 */
+  Indicator_Request(INDICATOR_PRIO_TASK, task_buzzer_on,
+                    (task_alert_on != 0U) ? INDICATOR_YELLOW : INDICATOR_OFF,
+                    (task_alert_on != 0U) ? INDICATOR_YELLOW : INDICATOR_OFF,
+                    0U);
+}
+
 static void VisionTask_Alert(uint8_t on)
 {
-  /* 入库提示：两侧 RGB 同时点亮（RGB_SetColor 的 r/g 分别对应右/左侧红色）。 */
-  RGB_SetColor(on, on, 0U);
+  task_alert_on = on;
+  VisionTask_Apply();
 }
 
 static void VisionTask_Buzzer(uint8_t on)
 {
-  HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin,
-                    (on != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+  task_buzzer_on = on;
+  VisionTask_Apply();
 }
 
-static void VisionTask_Begin(VisionTask_State state)
+/* 内部启动一个任务。公开的 VisionTask_Begin(Event_Type) 是调度器入口，
+   两者名字容易混，这个改叫 Start。 */
+static void VisionTask_Start(VisionTask_State state)
 {
   task_state = state;
   task_start_tick = HAL_GetTick();
@@ -35,6 +59,7 @@ static void VisionTask_Finish(void)
   VisionTask_Alert(0U);
   VisionTask_Buzzer(0U);
   task_state = VISION_TASK_IDLE;
+  task_phase = 0U;
   printf("[VTASK] done, speed=%u\r\n", (unsigned)task_speed);
 }
 
@@ -67,25 +92,24 @@ const char *VisionTask_StateName(VisionTask_State state)
 }
 
 /**
-  * @brief  接收新的视觉事件
-  * @note   限速/解除限速只改巡线速度，不创建任务，也不抢占底盘。
-  *         其余事件创建任务；任务运行中不接收同类新事件，避免反复重启动作。
+  * @brief  按事件创建任务（调度器入口）
+  * @retval 1=起了占用底盘的任务，0=只改配置或被忽略
+  *
+  * @note   限速/解除限速是持续配置，只改巡线速度，不创建任务也不抢占底盘。
+  *
+  * @note   任务运行中不接收新任务事件，避免反复重启动作。VISION_TASK_STOPPED
+  *         （1 号库停稳后）允许接受新任务：设计意图是"停在库里直到识别到新的
+  *         视觉任务"。
   */
-static void VisionTask_AcceptEvent(void)
+uint8_t VisionTask_Begin(Event_Type type)
 {
-  Vision_Event event;
+  /* 可以起新任务的状态：空闲，或 1 号库停稳后的停止态。 */
+  uint8_t acceptable = (uint8_t)((task_state == VISION_TASK_IDLE) ||
+                                 (task_state == VISION_TASK_STOPPED));
 
-  if (VisionUart_ReadEvent(&event) == 0U)
+  switch (type)
   {
-    return;
-  }
-
-  printf("[VISION] %s (id=%u)\r\n",
-         VisionUart_TargetName(event.target), event.id);
-
-  switch (event.target)
-  {
-    case VISION_TARGET_SPEED_NORMAL:
+    case EVENT_VISION_SPEED_LIMIT:
       /* 限速：在正常速度基础上降低固定占空比，并保护下限。 */
       if (VISION_SPEED_NORMAL > VISION_SPEED_LIMIT_DROP)
       {
@@ -96,55 +120,41 @@ static void VisionTask_AcceptEvent(void)
         task_speed = 0U;
       }
       printf("[VTASK] speed limited to %u\r\n", (unsigned)task_speed);
-      break;
+      return 0U;
 
-    case VISION_TARGET_SPEED_RELEASE:
+    case EVENT_VISION_SPEED_RELEASE:
       /* 解除限速：恢复正常巡线速度。 */
       task_speed = VISION_SPEED_NORMAL;
       printf("[VTASK] speed restored to %u\r\n", (unsigned)task_speed);
-      break;
+      return 0U;
 
-    case VISION_TARGET_TURN_LEFT:
-      if ((task_state == VISION_TASK_IDLE) ||
-          (task_state == VISION_TASK_STOPPED))
-      {
-        VisionTask_Begin(VISION_TASK_TURN_LEFT);
-      }
-      break;
+    case EVENT_VISION_TURN_LEFT:
+      if (acceptable == 0U) return 0U;
+      VisionTask_Start(VISION_TASK_TURN_LEFT);
+      return 1U;
 
-    case VISION_TARGET_TURN_RIGHT:
-      if ((task_state == VISION_TASK_IDLE) ||
-          (task_state == VISION_TASK_STOPPED))
-      {
-        VisionTask_Begin(VISION_TASK_TURN_RIGHT);
-      }
-      break;
+    case EVENT_VISION_TURN_RIGHT:
+      if (acceptable == 0U) return 0U;
+      VisionTask_Start(VISION_TASK_TURN_RIGHT);
+      return 1U;
 
-    case VISION_TARGET_HORN:
-      if ((task_state == VISION_TASK_IDLE) ||
-          (task_state == VISION_TASK_STOPPED))
-      {
-        VisionTask_Begin(VISION_TASK_HORN);
-      }
-      break;
+    case EVENT_VISION_HORN:
+      if (acceptable == 0U) return 0U;
+      VisionTask_Start(VISION_TASK_HORN);
+      return 1U;
 
-    case VISION_TARGET_PARK_1:
-      if ((task_state == VISION_TASK_IDLE) ||
-          (task_state == VISION_TASK_STOPPED))
-      {
-        VisionTask_Begin(VISION_TASK_PARK_1);
-      }
-      break;
+    case EVENT_VISION_PARK_1:
+      if (acceptable == 0U) return 0U;
+      VisionTask_Start(VISION_TASK_PARK_1);
+      return 1U;
 
-    case VISION_TARGET_PARK_2:
-      if ((task_state == VISION_TASK_IDLE) ||
-          (task_state == VISION_TASK_STOPPED))
-      {
-        VisionTask_Begin(VISION_TASK_PARK_2);
-      }
-      break;
+    case EVENT_VISION_PARK_2:
+      if (acceptable == 0U) return 0U;
+      VisionTask_Start(VISION_TASK_PARK_2);
+      return 1U;
+
     default:
-      break;
+      return 0U;
   }
 }
 
@@ -246,21 +256,54 @@ static void VisionTask_RunPark2(void)
   }
 }
 
-uint8_t VisionTask_Handle(void)
+/**
+  * @brief  转弯任务：非阻塞推进原地旋转
+  * @note   task_phase 0=还没发起动作，1=动作进行中。
+  *         car 的角度动作改成状态机后，转弯期间主循环仍能仲裁急停和手动接管。
+  */
+static void VisionTask_RunTurn(int32_t angle_deg10)
 {
-  VisionTask_AcceptEvent();
+  if (task_phase == 0U)
+  {
+    if (Car_StartRotateAngle(VISION_TURN_SPEED, angle_deg10) != CAR_ACTION_BUSY)
+    {
+      /* 发起失败（速度低于标定下限、或已有动作在跑）：放弃任务，交回循迹。 */
+      printf("[VTASK] turn rejected\r\n");
+      VisionTask_Finish();
+      return;
+    }
+    task_phase = 1U;
+    return;
+  }
 
+  switch (Car_ActionStep())
+  {
+    case CAR_ACTION_BUSY:
+      break;
+
+    case CAR_ACTION_DONE:
+      VisionTask_Finish();
+      break;
+
+    default:
+      /* 超时或失败：car 已制动，任务照样结束，避免卡在这一相。 */
+      printf("[VTASK] turn failed\r\n");
+      VisionTask_Finish();
+      break;
+  }
+}
+
+uint8_t VisionTask_Step(void)
+{
   switch (task_state)
   {
     case VISION_TASK_TURN_LEFT:
-      /* car 的角度旋转当前是阻塞式，动作完成后立即结束任务。 */
-      Car_RotateLeftAngle(VISION_TURN_SPEED, VISION_TURN_ANGLE_DEG10);
-      VisionTask_Finish();
+      /* 带符号角度：正=左转。 */
+      VisionTask_RunTurn((int32_t)VISION_TURN_ANGLE_DEG10);
       return 1U;
 
     case VISION_TASK_TURN_RIGHT:
-      Car_RotateRightAngle(VISION_TURN_SPEED, VISION_TURN_ANGLE_DEG10);
-      VisionTask_Finish();
+      VisionTask_RunTurn(-(int32_t)VISION_TURN_ANGLE_DEG10);
       return 1U;
 
     case VISION_TASK_HORN:
@@ -276,13 +319,31 @@ uint8_t VisionTask_Handle(void)
       return 1U;
 
     case VISION_TASK_STOPPED:
-      /* 1 号库结束后保持停止；新的运动类视觉事件可在
-         VisionTask_AcceptEvent() 中重新唤醒任务。 */
+      /* 1 号库结束后保持停止，仍占用底盘；新的视觉任务事件可重新唤醒
+         （见 VisionTask_Begin 对 STOPPED 的处理）。 */
       Car_Stop();
       return 1U;
 
     default:
       return 0U;
   }
+}
+
+void VisionTask_Cancel(void)
+{
+  if (task_state != VISION_TASK_IDLE)
+  {
+    printf("[VTASK] cancelled at %s\r\n", VisionTask_StateName(task_state));
+  }
+  Car_ActionAbort();
+  VisionTask_Alert(0U);
+  VisionTask_Buzzer(0U);
+  task_state = VISION_TASK_IDLE;
+  task_phase = 0U;
+}
+
+uint8_t VisionTask_IsBusy(void)
+{
+  return (task_state != VISION_TASK_IDLE) ? 1U : 0U;
 }
 

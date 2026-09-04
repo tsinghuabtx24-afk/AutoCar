@@ -1,5 +1,6 @@
 #include "vision_uart.h"
 #include "usart.h"
+#include "event.h"
 
 #include <stdio.h>
 
@@ -12,6 +13,24 @@ static volatile uint32_t vision_rx_count;
 static volatile uint8_t vision_last_byte;
 static volatile uint32_t vision_error_count;
 static volatile uint32_t vision_last_error;
+
+/**
+  * @brief  视觉目标 → 全车事件
+  */
+static Event_Type VisionUart_TargetToEvent(Vision_Target target)
+{
+  switch (target)
+  {
+    case VISION_TARGET_SPEED_NORMAL:  return EVENT_VISION_SPEED_LIMIT;
+    case VISION_TARGET_SPEED_RELEASE: return EVENT_VISION_SPEED_RELEASE;
+    case VISION_TARGET_TURN_LEFT:     return EVENT_VISION_TURN_LEFT;
+    case VISION_TARGET_TURN_RIGHT:    return EVENT_VISION_TURN_RIGHT;
+    case VISION_TARGET_HORN:          return EVENT_VISION_HORN;
+    case VISION_TARGET_PARK_1:        return EVENT_VISION_PARK_1;
+    case VISION_TARGET_PARK_2:        return EVENT_VISION_PARK_2;
+    default:                          return EVENT_NONE;
+  }
+}
 
 static Vision_Target VisionUart_IdToTarget(uint8_t id)
 {
@@ -72,9 +91,12 @@ void VisionUart_RxCpltCallback(UART_HandleTypeDef *huart)
       target = VisionUart_IdToTarget(vision_frame_id);
       if (vision_rx_byte == checksum && target != (Vision_Target)0xFFU)
       {
+        /* 单事件槽保留给旧的诊断读法；正式路径投递到全车事件队列，
+           这样任务执行期间到达的第二个事件不会被覆盖。 */
         vision_event.target = target;
         vision_event.id = vision_frame_id;
         vision_event_ready = 1U;
+        (void)Event_Post(VisionUart_TargetToEvent(target), vision_frame_id);
       }
       else
       {

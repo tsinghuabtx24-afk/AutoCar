@@ -82,9 +82,16 @@ extern "C" {
 #define CLOVER_TURN_SPEED      100U   /* 叶片之间原地转向的速度 */
 #define CLOVER_TURN_MS         420U   /* 原地转 120° 所需时间，待标定 */
 
-/* 按编码器距离运动的异常保护时间。编码器没有脉冲时到期自动制动，
-   防止因编码器接线或参数错误导致小车一直运行。 */
+/* 按编码器运动的异常保护时间。编码器没有脉冲时到期自动制动，防止因编码器
+   接线或参数错误导致小车一直运行。距离动作和角度动作共用该上限。 */
 #define CAR_DISTANCE_TIMEOUT_MS  60000U
+
+/* 动作诊断输出周期。原阻塞循环里每 500ms 打一行，改为非阻塞后沿用同一周期。 */
+#define CAR_ACTION_REPORT_MS     500U
+
+/* 纯计时动作（定时保持、变速斜坡、制动保持）的超时余量。这类动作不依赖编码器，
+   到点必然完成，超时只是防"调用方忘了推进 Step"的兜底，不需要 60 秒。 */
+#define CAR_ACTION_TIMEOUT_MARGIN_MS  1000U
 
 /* ==== 编码器角度滑移补偿 ====================================================
    轮胎原地旋转和差速转弯时存在横向滑移，编码器计算角度会明显大于车体真实
@@ -106,6 +113,75 @@ extern "C" {
 #define CAR_TURN_LEFT_COMP_X1000    2200U
 #define CAR_TURN_RIGHT_COMP_X1000   3000U
 
+/* ==== 非阻塞动作状态机 ======================================================
+   长动作（按里程、按角度、变速斜坡、定时保持）统一走"发起 + 每轮推进"两步：
+
+       Car_StartForwardDistance(70U, 200U);      // 发起一次
+       ...
+       switch (Car_ActionStep())                 // 每轮主循环推进一次
+       {
+         case CAR_ACTION_BUSY:    break;                     // 还在走
+         case CAR_ACTION_DONE:    task_phase++;        break; // 完成
+         case CAR_ACTION_TIMEOUT:
+         case CAR_ACTION_FAILED:  task_state = FAILED; break; // 失败
+       }
+
+   同一时刻只允许一个动作。终态（DONE/TIMEOUT/FAILED）时内部已制动并转 IDLE，
+   Step 返回终态**一次**，之后返回 IDLE。
+
+   动作内部保存编码器起始快照，不再调用 Encoder_ResetAll()，因此不会破坏
+   其他模块的里程基准。
+   ============================================================================ */
+typedef enum
+{
+  CAR_ACTION_IDLE = 0,    /* 无动作 */
+  CAR_ACTION_BUSY,        /* 进行中，需要继续 Step */
+  CAR_ACTION_DONE,        /* 正常完成，已制动 */
+  CAR_ACTION_TIMEOUT,     /* 超时退出，已制动 */
+  CAR_ACTION_FAILED       /* 参数非法（已制动），或已有动作在跑（未干扰它） */
+} Car_ActionStatus;
+
+/* 发起动作，成功返回 CAR_ACTION_BUSY。两种失败要分清：
+     - 参数非法（速度落在死区、距离/角度为 0）：制动后返回 FAILED；
+     - 已有动作在跑：返回 FAILED 且**不打断**它，底盘不受影响。
+   需要抢占的调用方应先显式 Car_ActionAbort()。 */
+Car_ActionStatus Car_StartForwardDistance(uint8_t speed, uint32_t distance_mm);
+Car_ActionStatus Car_StartBackwardDistance(uint8_t speed, uint32_t distance_mm);
+
+/* 角度动作用带符号角度：正=左转，负=右转。radius_mm 为 0 表示原地旋转。 */
+Car_ActionStatus Car_StartRotateAngle(uint8_t speed, int32_t angle_deg10);
+Car_ActionStatus Car_StartTurnAngle(uint8_t speed, uint16_t radius_mm,
+                                    int32_t angle_deg10);
+
+/* 定时类动作：保持当前差速 time 毫秒后制动。left/right 为占空比刻度，
+   正数向前，取值 -100~100。 */
+Car_ActionStatus Car_StartTimed(int16_t left, int16_t right, uint16_t time);
+
+/* 变速直线：time 内速度从 speed_from 线性变到 speed_to，结束后制动。 */
+Car_ActionStatus Car_StartForwardVary(uint8_t speed_from, uint8_t speed_to,
+                                      uint16_t time);
+
+/* 制动并保持 time 毫秒。time 为 0 时立即完成。 */
+Car_ActionStatus Car_StartBrake(uint16_t time);
+
+/* 每轮主循环推进一次。无动作时返回 CAR_ACTION_IDLE，不触碰底盘。 */
+Car_ActionStatus Car_ActionStep(void);
+
+/* 立即放弃当前动作并制动。无动作时无副作用。 */
+void Car_ActionAbort(void);
+
+/* 查询当前状态，不推进。 */
+Car_ActionStatus Car_GetActionStatus(void);
+uint8_t Car_IsActionBusy(void);
+
+/* ==== 瞬时接口 ==============================================================
+   设置 PWM 后立即返回，供循迹、手动遥控等周期控制使用。
+   ============================================================================ */
+
+/* 直接指定左右两侧速度，占空比刻度 -100~100，正数向前。
+   循迹的差速连续修正和遥控手动转向用这个。 */
+void Car_DriveSpeed(int16_t left, int16_t right);
+
 /* Exported functions prototypes ---------------------------------------------*/
 void Car_Init(void);
 
@@ -125,6 +201,10 @@ void Car_RotateRightAngle(uint8_t speed, uint32_t angle_deg10);
 void Car_TurnLeftAngle(uint8_t speed, uint16_t radius_mm, uint32_t angle_deg10);
 void Car_TurnRightAngle(uint8_t speed, uint16_t radius_mm, uint32_t angle_deg10);
 void Car_Brake(uint16_t time);
+
+/* 上面这批阻塞接口保留作独立标定入口：内部实现为"Start + 循环 Step 直到终态"，
+   与非阻塞路径共享同一份逻辑，标定值不会两处不同步。正式主循环不要调用它们，
+   否则调度器在动作期间无法仲裁。 */
 
 void Car_Clover(uint8_t speed, uint16_t radius_mm, uint16_t leaf_time);
 

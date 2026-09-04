@@ -1,24 +1,36 @@
+/**
+  ******************************************************************************
+  * @file    ir_avoid.c
+  * @brief   双路红外避障传感器实现
+  ******************************************************************************
+  * @note    只采样、只判状态、只发事件。避障动作见 avoid_task.c。
+  ******************************************************************************
+  */
+
 #include "ir_avoid.h"
 #include "adc.h"
-#include "car.h"
+#include "event.h"
 #include "retarget.h"
 
 #include <stdio.h>
 
-/* 独立于 main 的红外避障执行参数。 */
-#define IR_AVOID_FORWARD_SPEED       70U
-#define IR_AVOID_REVERSE_SPEED       70U
-#define IR_AVOID_ROTATE_SPEED        80U
-#define IR_AVOID_REVERSE_DISTANCE_MM 50U
-#define IR_AVOID_ROTATE_ANGLE_DEG10  300U
-#define IR_AVOID_RGB_PERIOD_MS       200U
+/* 采样相位。发射管使能后需要 IR_AVOID_EMITTER_SETTLE_MS 稳定，
+   原来用 HAL_Delay 等，现在拆成相位由主循环推进。 */
+typedef enum
+{
+  IR_PHASE_IDLE = 0,      /* 等下一轮采样周期 */
+  IR_PHASE_LEFT_SETTLE,   /* 左发射管已开，等稳定 */
+  IR_PHASE_RIGHT_SETTLE   /* 右发射管已开，等稳定 */
+} IrAvoid_Phase;
 
 static IrAvoid_State ir_state;
+static IrAvoid_Phase ir_phase;
 static uint16_t ir_left_raw;
 static uint16_t ir_right_raw;
 static uint32_t ir_last_update;
+static uint32_t ir_phase_tick;
 static uint32_t ir_last_report;
-static uint32_t ir_random_state = 0xA5C31F27UL;
+static uint8_t  ir_has_sample;
 
 static uint16_t IrAvoid_ReadChannel(uint32_t channel)
 {
@@ -61,57 +73,72 @@ static uint8_t IrAvoid_Level(uint16_t value, uint16_t threshold,
 #endif
 }
 
-void IrAvoid_Init(void)
+static void IrAvoid_SetEmitter(uint8_t left_on, uint8_t right_on)
 {
   HAL_GPIO_WritePin(IR_AVOID_LEFT_ENABLE_PORT, IR_AVOID_LEFT_ENABLE_PIN,
-                    IR_AVOID_DISABLE_LEVEL);
+                    (left_on != 0U) ? IR_AVOID_ENABLE_LEVEL
+                                    : IR_AVOID_DISABLE_LEVEL);
   HAL_GPIO_WritePin(IR_AVOID_RIGHT_ENABLE_PORT, IR_AVOID_RIGHT_ENABLE_PIN,
-                    IR_AVOID_DISABLE_LEVEL);
-  ir_state = IR_AVOID_CLEAR;
-  ir_left_raw = 0U;
-  ir_right_raw = 0U;
+                    (right_on != 0U) ? IR_AVOID_ENABLE_LEVEL
+                                     : IR_AVOID_DISABLE_LEVEL);
+}
+
+void IrAvoid_Init(void)
+{
+  ir_state       = IR_AVOID_CLEAR;
+  ir_phase       = IR_PHASE_IDLE;
+  ir_left_raw    = 0U;
+  ir_right_raw   = 0U;
   ir_last_update = 0U;
+  ir_phase_tick  = 0U;
   ir_last_report = 0U;
-  HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
-  RGB_SetColor(0U, 0U, 0U);
+  ir_has_sample  = 0U;
+
+  IrAvoid_SetEmitter(0U, 0U);
   printf("[IR] init: PF9=left PF10=right threshold=%u\r\n",
          (unsigned)IR_AVOID_LEFT_THRESHOLD);
 }
 
-void IrAvoid_Update(void)
+void IrAvoid_Restart(void)
 {
-  uint32_t now = HAL_GetTick();
+  IrAvoid_SetEmitter(0U, 0U);
+  ir_phase       = IR_PHASE_IDLE;
+  ir_last_update = 0U;   /* 立刻允许下一轮采样 */
+  ir_has_sample  = 0U;
+}
+
+/**
+  * @brief  两路原始值都拿到后，更新状态并在变化时发事件
+  */
+static void IrAvoid_Commit(uint32_t now)
+{
+  IrAvoid_State previous = ir_state;
   uint8_t left_blocked;
   uint8_t right_blocked;
 
-  if ((uint32_t)(now - ir_last_update) < IR_AVOID_UPDATE_PERIOD_MS)
-  {
-    return;
-  }
-  ir_last_update = now;
-
-  HAL_GPIO_WritePin(IR_AVOID_LEFT_ENABLE_PORT, IR_AVOID_LEFT_ENABLE_PIN,
-                    IR_AVOID_ENABLE_LEVEL);
-  HAL_Delay(IR_AVOID_EMITTER_SETTLE_MS);
-  ir_left_raw = IrAvoid_ReadChannel(IR_AVOID_LEFT_ADC_CHANNEL);
-  HAL_GPIO_WritePin(IR_AVOID_LEFT_ENABLE_PORT, IR_AVOID_LEFT_ENABLE_PIN,
-                    IR_AVOID_DISABLE_LEVEL);
-
-  HAL_GPIO_WritePin(IR_AVOID_RIGHT_ENABLE_PORT, IR_AVOID_RIGHT_ENABLE_PIN,
-                    IR_AVOID_ENABLE_LEVEL);
-  HAL_Delay(IR_AVOID_EMITTER_SETTLE_MS);
-  ir_right_raw = IrAvoid_ReadChannel(IR_AVOID_RIGHT_ADC_CHANNEL);
-  HAL_GPIO_WritePin(IR_AVOID_RIGHT_ENABLE_PORT, IR_AVOID_RIGHT_ENABLE_PIN,
-                    IR_AVOID_DISABLE_LEVEL);
-
   left_blocked = IrAvoid_Level(ir_left_raw, IR_AVOID_LEFT_THRESHOLD,
-                               (ir_state == IR_AVOID_LEFT || ir_state == IR_AVOID_BOTH));
+                               (previous == IR_AVOID_LEFT ||
+                                previous == IR_AVOID_BOTH));
   right_blocked = IrAvoid_Level(ir_right_raw, IR_AVOID_RIGHT_THRESHOLD,
-                                (ir_state == IR_AVOID_RIGHT || ir_state == IR_AVOID_BOTH));
+                                (previous == IR_AVOID_RIGHT ||
+                                 previous == IR_AVOID_BOTH));
 
   ir_state = (left_blocked != 0U)
                ? ((right_blocked != 0U) ? IR_AVOID_BOTH : IR_AVOID_LEFT)
                : ((right_blocked != 0U) ? IR_AVOID_RIGHT : IR_AVOID_CLEAR);
+  ir_has_sample = 1U;
+
+  /* 只在状态变化时发事件，避免每 20ms 灌满队列。 */
+  if (ir_state != previous)
+  {
+    switch (ir_state)
+    {
+      case IR_AVOID_LEFT:  (void)Event_Post(EVENT_OBSTACLE_LEFT,  0U); break;
+      case IR_AVOID_RIGHT: (void)Event_Post(EVENT_OBSTACLE_RIGHT, 0U); break;
+      case IR_AVOID_BOTH:  (void)Event_Post(EVENT_OBSTACLE_BOTH,  0U); break;
+      default:             (void)Event_Post(EVENT_OBSTACLE_CLEAR, 0U); break;
+    }
+  }
 
   if ((uint32_t)(now - ir_last_report) >= IR_AVOID_REPORT_PERIOD_MS)
   {
@@ -122,136 +149,85 @@ void IrAvoid_Update(void)
   }
 }
 
+void IrAvoid_Sense(void)
+{
+  uint32_t now = HAL_GetTick();
+
+  switch (ir_phase)
+  {
+    case IR_PHASE_IDLE:
+      if ((uint32_t)(now - ir_last_update) < IR_AVOID_UPDATE_PERIOD_MS)
+      {
+        return;
+      }
+      ir_last_update = now;
+      /* 开左发射管，等稳定。 */
+      IrAvoid_SetEmitter(1U, 0U);
+      ir_phase_tick = now;
+      ir_phase      = IR_PHASE_LEFT_SETTLE;
+      break;
+
+    case IR_PHASE_LEFT_SETTLE:
+      if ((uint32_t)(now - ir_phase_tick) < IR_AVOID_EMITTER_SETTLE_MS)
+      {
+        return;
+      }
+      ir_left_raw = IrAvoid_ReadChannel(IR_AVOID_LEFT_ADC_CHANNEL);
+      /* 关左、开右，等稳定。 */
+      IrAvoid_SetEmitter(0U, 1U);
+      ir_phase_tick = now;
+      ir_phase      = IR_PHASE_RIGHT_SETTLE;
+      break;
+
+    case IR_PHASE_RIGHT_SETTLE:
+    default:
+      if ((uint32_t)(now - ir_phase_tick) < IR_AVOID_EMITTER_SETTLE_MS)
+      {
+        return;
+      }
+      ir_right_raw = IrAvoid_ReadChannel(IR_AVOID_RIGHT_ADC_CHANNEL);
+      IrAvoid_SetEmitter(0U, 0U);
+      ir_phase = IR_PHASE_IDLE;
+      IrAvoid_Commit(now);
+      break;
+  }
+}
+
+/**
+  * @brief  阻塞式单次采样，仅供独立标定使用
+  */
+void IrAvoid_UpdateBlocking(void)
+{
+  uint32_t now;
+
+  IrAvoid_SetEmitter(1U, 0U);
+  HAL_Delay(IR_AVOID_EMITTER_SETTLE_MS);
+  ir_left_raw = IrAvoid_ReadChannel(IR_AVOID_LEFT_ADC_CHANNEL);
+
+  IrAvoid_SetEmitter(0U, 1U);
+  HAL_Delay(IR_AVOID_EMITTER_SETTLE_MS);
+  ir_right_raw = IrAvoid_ReadChannel(IR_AVOID_RIGHT_ADC_CHANNEL);
+
+  IrAvoid_SetEmitter(0U, 0U);
+  now = HAL_GetTick();
+  IrAvoid_Commit(now);
+}
+
 IrAvoid_State IrAvoid_GetState(void) { return ir_state; }
-uint8_t IrAvoid_IsLeftBlocked(void) { return (ir_state == IR_AVOID_LEFT || ir_state == IR_AVOID_BOTH); }
+uint8_t IrAvoid_IsLeftBlocked(void)  { return (ir_state == IR_AVOID_LEFT  || ir_state == IR_AVOID_BOTH); }
 uint8_t IrAvoid_IsRightBlocked(void) { return (ir_state == IR_AVOID_RIGHT || ir_state == IR_AVOID_BOTH); }
-uint8_t IrAvoid_IsAnyBlocked(void) { return (ir_state != IR_AVOID_CLEAR) ? 1U : 0U; }
-uint16_t IrAvoid_GetLeftRaw(void) { return ir_left_raw; }
-uint16_t IrAvoid_GetRightRaw(void) { return ir_right_raw; }
+uint8_t IrAvoid_IsAnyBlocked(void)   { return (ir_state != IR_AVOID_CLEAR) ? 1U : 0U; }
+uint16_t IrAvoid_GetLeftRaw(void)    { return ir_left_raw; }
+uint16_t IrAvoid_GetRightRaw(void)   { return ir_right_raw; }
+uint8_t IrAvoid_HasSample(void)      { return ir_has_sample; }
 
 const char *IrAvoid_StateName(IrAvoid_State state)
 {
   switch (state)
   {
-    case IR_AVOID_LEFT: return "LEFT";
+    case IR_AVOID_LEFT:  return "LEFT";
     case IR_AVOID_RIGHT: return "RIGHT";
-    case IR_AVOID_BOTH: return "BOTH";
-    default: return "CLEAR";
+    case IR_AVOID_BOTH:  return "BOTH";
+    default:             return "CLEAR";
   }
-}
-
-static void IrAvoid_UpdateAlert(IrAvoid_State state)
-{
-  static uint32_t last_blink_tick;
-  static uint8_t blink_on;
-  static IrAvoid_State last_alert_state = IR_AVOID_CLEAR;
-  uint32_t now = HAL_GetTick();
-
-  if (state == IR_AVOID_CLEAR)
-  {
-    blink_on = 0U;
-    HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
-    RGB_SetColor(0U, 0U, 0U);
-  }
-  else
-  {
-    HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_SET);
-
-    if (state != last_alert_state)
-    {
-      blink_on = 1U;
-      last_blink_tick = now;
-    }
-    else if ((uint32_t)(now - last_blink_tick) >= IR_AVOID_RGB_PERIOD_MS)
-    {
-      blink_on = (blink_on == 0U) ? 1U : 0U;
-      last_blink_tick = now;
-    }
-
-    /* RGB_SetColor 的实际映射：g 控制左侧红色，r 控制右侧红色。 */
-    RGB_SetColor(
-        (uint8_t)(blink_on != 0U &&
-                  (state == IR_AVOID_RIGHT || state == IR_AVOID_BOTH)),
-        (uint8_t)(blink_on != 0U &&
-                  (state == IR_AVOID_LEFT || state == IR_AVOID_BOTH)),
-        0U);
-  }
-
-  last_alert_state = state;
-}
-
-static uint8_t IrAvoid_RandomBit(void)
-{
-  /* 软件伪随机：加入时间和 ADC 采样值，避免每次上电方向完全固定。 */
-  ir_random_state ^= HAL_GetTick();
-  ir_random_state ^= ((uint32_t)ir_left_raw << 16) | ir_right_raw;
-  ir_random_state ^= ir_random_state << 13;
-  ir_random_state ^= ir_random_state >> 17;
-  ir_random_state ^= ir_random_state << 5;
-  return (uint8_t)(ir_random_state & 1U);
-}
-
-static void IrAvoid_RotateAway(IrAvoid_State state)
-{
-  if (state == IR_AVOID_LEFT)
-  {
-    /* 左侧有障碍，向右旋转。 */
-    Car_RotateRightAngle(IR_AVOID_ROTATE_SPEED, IR_AVOID_ROTATE_ANGLE_DEG10);
-  }
-  else if (state == IR_AVOID_RIGHT)
-  {
-    /* 右侧有障碍，向左旋转。 */
-    Car_RotateLeftAngle(IR_AVOID_ROTATE_SPEED, IR_AVOID_ROTATE_ANGLE_DEG10);
-  }
-}
-
-uint8_t IrAvoid_Handle(void)
-{
-  IrAvoid_State state;
-
-  IrAvoid_Update();
-  state = IrAvoid_GetState();
-  IrAvoid_UpdateAlert(state);
-
-  if (state == IR_AVOID_CLEAR)
-  {
-    IrAvoid_UpdateAlert(IR_AVOID_CLEAR);
-    return 0U;
-  }
-
-  Car_Stop();
-  /* 告警只覆盖本次避障动作，不因障碍仍在视野内而持续占用告警。 */
-  IrAvoid_UpdateAlert(state);
-
-  if (state == IR_AVOID_BOTH)
-  {
-    Car_BackwardDistance(IR_AVOID_REVERSE_SPEED,
-                         IR_AVOID_REVERSE_DISTANCE_MM);
-    /* 后退动作可能恰好未跨过采样周期，强制重新采样左右 ADC。 */
-    ir_last_update = 0U;
-    IrAvoid_Update();
-    state = IrAvoid_GetState();
-    IrAvoid_UpdateAlert(state);
-
-    /* 后退后必须先随机转向 30°，不根据此刻的左右状态改变这一次转向。 */
-    IrAvoid_UpdateAlert(IR_AVOID_BOTH);
-    if (IrAvoid_RandomBit() != 0U)
-    {
-      Car_RotateLeftAngle(IR_AVOID_ROTATE_SPEED, IR_AVOID_ROTATE_ANGLE_DEG10);
-    }
-    else
-    {
-      Car_RotateRightAngle(IR_AVOID_ROTATE_SPEED, IR_AVOID_ROTATE_ANGLE_DEG10);
-    }
-    IrAvoid_UpdateAlert(IR_AVOID_CLEAR);
-    /* 转向结束后下一轮再重新检测。 */
-    ir_last_update = 0U;
-    return 1U;
-  }
-
-  IrAvoid_RotateAway(state);
-  IrAvoid_UpdateAlert(IR_AVOID_CLEAR);
-  /* 下一次 Handle 必须重新采样，判断旋转后障碍是否仍存在。 */
-  ir_last_update = 0U;
-  return 1U;
 }

@@ -7,6 +7,7 @@ extern "C" {
 
 #include "main.h"
 #include "vision_uart.h"
+#include "event.h"
 
 /* ==== 速度配置 ==============================================================
    巡线默认速度与限速后的速度。速度刻度沿用 car 模块的 0~100 占空比刻度。
@@ -45,11 +46,23 @@ typedef enum
 void VisionTask_Init(void);
 
 /*
- * 处理一次视觉事件与当前任务。
- * 返回 1：视觉任务占用底盘，调用方不得驱动电机；
- * 返回 0：没有任务占用，调用方可运行默认行为（循迹或直行）。
+ * 按事件创建任务。由调度器调用。
+ * 返回 1：确实起了一个占用底盘的任务，调度器应切到 CONTROL_TASK；
+ * 返回 0：事件只改配置（限速）或被忽略（同类任务已在跑），模式不变。
  */
-uint8_t VisionTask_Handle(void);
+uint8_t VisionTask_Begin(Event_Type type);
+
+/*
+ * 推进当前任务一步。由调度器在 CONTROL_TASK 模式下每轮调用。
+ * 返回 1：仍占用底盘；
+ * 返回 0：已完成，调度器应交回循迹。
+ */
+uint8_t VisionTask_Step(void);
+
+/* 放弃当前任务并制动。急停时由调度器调用。 */
+void VisionTask_Cancel(void);
+
+uint8_t VisionTask_IsBusy(void);
 
 /* 当前巡线速度，受限速/解除限速事件影响。 */
 uint8_t VisionTask_GetSpeed(void);

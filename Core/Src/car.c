@@ -20,6 +20,42 @@
    才对应物理车头方向。以后只调整这一项，不再同时改多个方向参数。 */
 #define CAR_FORWARD_POLARITY       (-1)
 
+/* Private types -------------------------------------------------------------*/
+/* 动作种类。IDLE 之外每一种对应 Car_ActionStep() 里的一个推进分支。 */
+typedef enum
+{
+  CAR_ACT_NONE = 0,
+  CAR_ACT_DISTANCE,   /* 按编码器里程 */
+  CAR_ACT_ANGLE,      /* 按编码器转角 */
+  CAR_ACT_TIMED,      /* 保持当前差速一段时间 */
+  CAR_ACT_RAMP,       /* 变速直线 */
+  CAR_ACT_BRAKE       /* 制动保持 */
+} Car_ActionKind;
+
+typedef struct
+{
+  Car_ActionKind kind;
+  uint32_t start_tick;
+  uint32_t last_report_tick;
+  uint32_t timeout_ms;
+
+  /* 编码器起始快照。不清零全局计数，用增量判断动作是否达标。 */
+  int32_t  start_distance_mm;
+  int32_t  start_angle_deg10;
+
+  uint32_t target_distance_mm;   /* DISTANCE */
+  uint32_t target_angle_deg10;   /* ANGLE，已含滑移补偿 */
+  uint16_t duration_ms;          /* TIMED / RAMP / BRAKE */
+
+  int16_t  ramp_from_eff;        /* RAMP 起始有效速度 */
+  int16_t  ramp_to_eff;          /* RAMP 结束有效速度 */
+
+  int8_t   direction;            /* 1=前进/左转，-1=后退/右转，仅用于诊断 */
+} Car_Action;
+
+/* Private variables ---------------------------------------------------------*/
+static Car_Action car_action;
+
 /* Private function prototypes -----------------------------------------------*/
 static uint8_t Car_ToEff(uint8_t speed);
 static int16_t Car_EffToDuty(int16_t eff);
@@ -28,6 +64,18 @@ static uint16_t Car_AngleCompX1000(uint8_t speed, uint16_t radius_mm,
 static void Car_RunDistance(uint8_t speed, uint32_t distance_mm, int8_t direction);
 static void Car_RunAngle(uint8_t speed, uint16_t radius_mm,
                          uint32_t angle_deg10, int8_t direction);
+static Car_ActionStatus Car_ActionFinish(Car_ActionStatus status);
+static Car_ActionStatus Car_RunToCompletion(Car_ActionStatus start_status);
+static int32_t Car_Abs32(int32_t v);
+static uint8_t Car_AngleWheelSpeeds(uint8_t speed, uint16_t radius_mm,
+                                    int8_t direction,
+                                    int16_t *left, int16_t *right);
+static uint8_t Car_ActionBegin(Car_ActionKind kind, int8_t direction);
+static Car_ActionStatus Car_StartDistance(uint8_t speed, uint32_t distance_mm,
+                                          int8_t direction);
+static Car_ActionStatus Car_StepDistance(uint32_t now);
+static Car_ActionStatus Car_StepAngle(uint32_t now);
+static Car_ActionStatus Car_StepRamp(uint32_t elapsed);
 
 /* Private functions ---------------------------------------------------------*/
 
@@ -171,6 +219,7 @@ static int16_t Car_InnerSpeed(uint8_t outer, uint16_t radius_mm)
 /**
   * @brief  保持当前动作一段时间后制动
   * @param  time: 毫秒
+  * @note   阻塞式，仅供保留的调试接口使用。
   */
 static void Car_RunFor(uint16_t time)
 {
@@ -179,114 +228,39 @@ static void Car_RunFor(uint16_t time)
 }
 
 /**
-  * @brief  按编码器里程直线运行
-  * @param  speed:       占空比刻度 0~100
-  * @param  distance_mm: 目标距离 mm
-  * @param  direction:   1=前进，-1=后退
-  * @note   此函数为阻塞式；Encoder_Update() 由 SysTick 持续执行，所以等待
-  *         期间编码器仍会正常累计。到达目标或超时后使用能耗制动停车。
+  * @brief  int32 取绝对值
+  * @note   用 int64 中转，避免 INT32_MIN 取反溢出。
   */
-static void Car_RunDistance(uint8_t speed, uint32_t distance_mm, int8_t direction)
+static int32_t Car_Abs32(int32_t v)
 {
-  int16_t v = (int16_t)Car_ToEff(speed);
-  uint32_t start_tick;
-  uint32_t last_report_tick;
-
-  if ((v == 0) || (distance_mm == 0U))
-  {
-    Motor_BrakeAll();
-    return;
-  }
-
-  Encoder_ResetAll();
-  start_tick = HAL_GetTick();
-  last_report_tick = start_tick;
-  printf("[DIST] start dir=%s target=%lumm speed=%u\r\n",
-         (direction > 0) ? "forward" : "backward",
-         (unsigned long)distance_mm,
-         (unsigned)speed);
-  Car_Drive((int16_t)(direction * v), (int16_t)(direction * v));
-
-  while (1)
-  {
-    uint32_t now = HAL_GetTick();
-    int32_t distance = Encoder_GetDistanceAvg();
-    uint32_t travelled = (distance >= 0)
-                           ? (uint32_t)distance
-                           : (uint32_t)(-(int64_t)distance);
-
-    if (travelled >= distance_mm)
-    {
-      break;
-    }
-    if ((uint32_t)(now - start_tick) >= CAR_DISTANCE_TIMEOUT_MS)
-    {
-      printf("[DIST] timeout\r\n");
-      break;
-    }
-    if ((uint32_t)(now - last_report_tick) >= 500U)
-    {
-      last_report_tick = now;
-      printf("[DIST %lums] count=%ld,%ld,%ld,%ld avg=%ldmm rpm=%d,%d,%d,%d\r\n",
-             (unsigned long)(now - start_tick),
-             (long)Encoder_GetCount(MOTOR_1),
-             (long)Encoder_GetCount(MOTOR_2),
-             (long)Encoder_GetCount(MOTOR_3),
-             (long)Encoder_GetCount(MOTOR_4),
-             (long)distance,
-             (int)Encoder_GetSpeedRpm(MOTOR_1),
-             (int)Encoder_GetSpeedRpm(MOTOR_2),
-             (int)Encoder_GetSpeedRpm(MOTOR_3),
-             (int)Encoder_GetSpeedRpm(MOTOR_4));
-    }
-    HAL_Delay(1U);
-  }
-
-  Motor_BrakeAll();
-  printf("[DIST] stop count=%ld,%ld,%ld,%ld avg=%ldmm\r\n",
-         (long)Encoder_GetCount(MOTOR_1),
-         (long)Encoder_GetCount(MOTOR_2),
-         (long)Encoder_GetCount(MOTOR_3),
-         (long)Encoder_GetCount(MOTOR_4),
-         (long)Encoder_GetDistanceAvg());
+  return (v >= 0) ? v : (int32_t)(-(int64_t)v);
 }
 
-static void Car_RunAngle(uint8_t speed, uint16_t radius_mm,
-                         uint32_t angle_deg10, int8_t direction)
+/**
+  * @brief  算出角度动作的左右轮有效速度
+  * @param  speed:     占空比刻度 0~100
+  * @param  radius_mm: 0=原地旋转，≤D/2=绕内侧轮，其余为差速圆弧
+  * @param  direction: 1=左转，-1=右转
+  * @param  left:      输出左侧有效速度
+  * @param  right:     输出右侧有效速度
+  * @retval 1=参数可用，0=速度落在死区内，调用方应制动并放弃动作
+  *
+  * @note   从原 Car_RunAngle 抽出，阻塞与非阻塞两条路径共用，避免运动学
+  *         算式出现两份实现。
+  */
+static uint8_t Car_AngleWheelSpeeds(uint8_t speed, uint16_t radius_mm,
+                                    int8_t direction,
+                                    int16_t *left, int16_t *right)
 {
-  int16_t outer;
+  int16_t outer = (int16_t)Car_ToEff(speed);
   int16_t inner;
-    int16_t left;
-  int16_t right;
-  uint32_t start_tick;
-  uint32_t last_report_tick;
-  uint32_t encoder_target_deg10;
-  uint16_t comp_x1000;
 
-  if (angle_deg10 == 0U)
-  {
-    Motor_BrakeAll();
-    return;
-  }
-
-#if CAR_ANGLE_COMP_ENABLE
-    if ((radius_mm == 0U) && (speed < CAR_ANGLE_MIN_SPEED))
-  {
-    printf("[ANGLE] rejected: speed %u < calibrated minimum %u\r\n",
-           (unsigned)speed, (unsigned)CAR_ANGLE_MIN_SPEED);
-    Motor_BrakeAll();
-    return;
-  }
-#endif
-
-  outer = (int16_t)Car_ToEff(speed);
   if (outer == 0)
   {
-    Motor_BrakeAll();
-    return;
+    return 0U;
   }
 
-      if (radius_mm == 0U)
+  if (radius_mm == 0U)
   {
     /* 原地旋转：左右轮等速反向。 */
     inner = (int16_t)(-outer);
@@ -301,75 +275,433 @@ static void Car_RunAngle(uint8_t speed, uint16_t radius_mm,
     inner = Car_InnerSpeed((uint8_t)outer, radius_mm);
   }
 
-      if (direction > 0)
+  if (direction > 0)
   {
-    left  = inner;
-    right = outer;
+    *left  = inner;
+    *right = outer;
   }
   else
   {
-    left  = outer;
-    right = inner;
+    *left  = outer;
+    *right = inner;
+  }
+  return 1U;
+}
+
+/**
+  * @brief  结束当前动作：制动、清状态、返回终态
+  */
+static Car_ActionStatus Car_ActionFinish(Car_ActionStatus status)
+{
+  Motor_BrakeAll();
+  car_action.kind = CAR_ACT_NONE;
+  return status;
+}
+
+/**
+  * @brief  循环推进当前动作直到终态
+  * @note   阻塞式，仅供保留的标定接口使用。正式主循环应自己调 Car_ActionStep()。
+  *         这里保留 1ms 让步，与原实现的节奏一致。
+  */
+static Car_ActionStatus Car_RunToCompletion(Car_ActionStatus start_status)
+{
+  Car_ActionStatus status = start_status;
+
+  /* 发起失败时直接返回。不能盲目 Step —— 若失败原因是"已有动作在跑"，
+     继续 Step 会把别人的动作推到完成。 */
+  while (status == CAR_ACTION_BUSY)
+  {
+    HAL_Delay(1U);
+    status = Car_ActionStep();
+  }
+  return status;
+}
+
+/**
+  * @brief  按编码器里程直线运行
+  * @param  speed:       占空比刻度 0~100
+  * @param  distance_mm: 目标距离 mm
+  * @param  direction:   1=前进，-1=后退
+  * @note   此函数为阻塞式；Encoder_Update() 由 SysTick 持续执行，所以等待
+  *         期间编码器仍会正常累计。到达目标或超时后使用能耗制动停车。
+  */
+static void Car_RunDistance(uint8_t speed, uint32_t distance_mm, int8_t direction)
+{
+  Car_ActionStatus started = (direction > 0)
+                               ? Car_StartForwardDistance(speed, distance_mm)
+                               : Car_StartBackwardDistance(speed, distance_mm);
+
+  (void)Car_RunToCompletion(started);
+}
+
+/**
+  * @brief  按编码器转角运行（阻塞式，标定入口）
+  * @param  direction: 1=左转，-1=右转
+  */
+static void Car_RunAngle(uint8_t speed, uint16_t radius_mm,
+                         uint32_t angle_deg10, int8_t direction)
+{
+  int32_t signed_angle = (direction > 0)
+                           ? (int32_t)angle_deg10
+                           : (int32_t)(-(int64_t)angle_deg10);
+
+  (void)Car_RunToCompletion(Car_StartTurnAngle(speed, radius_mm, signed_angle));
+}
+
+/* ==== 非阻塞动作状态机 =====================================================*/
+
+/**
+  * @brief  登记一个新动作的公共字段
+  * @retval 1=可以继续，0=已有动作在跑
+  */
+static uint8_t Car_ActionBegin(Car_ActionKind kind, int8_t direction)
+{
+  uint32_t now;
+
+  if (car_action.kind != CAR_ACT_NONE)
+  {
+    return 0U;
+  }
+
+  now = HAL_GetTick();
+  car_action.kind              = kind;
+  car_action.direction         = direction;
+  car_action.start_tick        = now;
+  car_action.last_report_tick  = now;
+  car_action.timeout_ms        = CAR_DISTANCE_TIMEOUT_MS;
+  /* 起始快照：不清零全局计数，用增量判断达标。 */
+  car_action.start_distance_mm = Encoder_GetDistanceAvg();
+  car_action.start_angle_deg10 = Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM);
+  return 1U;
+}
+
+static Car_ActionStatus Car_StartDistance(uint8_t speed, uint32_t distance_mm,
+                                         int8_t direction)
+{
+  int16_t v = (int16_t)Car_ToEff(speed);
+
+  if (Car_ActionBegin(CAR_ACT_DISTANCE, direction) == 0U)
+  {
+    printf("[DIST] rejected: action %u already running\r\n",
+           (unsigned)car_action.kind);
+    return CAR_ACTION_FAILED;
+  }
+
+  if ((v == 0) || (distance_mm == 0U))
+  {
+    return Car_ActionFinish(CAR_ACTION_FAILED);
+  }
+
+  car_action.target_distance_mm = distance_mm;
+
+  printf("[DIST] start dir=%s target=%lumm speed=%u\r\n",
+         (direction > 0) ? "forward" : "backward",
+         (unsigned long)distance_mm,
+         (unsigned)speed);
+  Car_Drive((int16_t)(direction * v), (int16_t)(direction * v));
+  return CAR_ACTION_BUSY;
+}
+
+Car_ActionStatus Car_StartForwardDistance(uint8_t speed, uint32_t distance_mm)
+{
+  return Car_StartDistance(speed, distance_mm, 1);
+}
+
+Car_ActionStatus Car_StartBackwardDistance(uint8_t speed, uint32_t distance_mm)
+{
+  return Car_StartDistance(speed, distance_mm, -1);
+}
+
+Car_ActionStatus Car_StartTurnAngle(uint8_t speed, uint16_t radius_mm,
+                                    int32_t angle_deg10)
+{
+  int8_t   direction = (angle_deg10 >= 0) ? 1 : -1;
+  uint32_t magnitude = (uint32_t)Car_Abs32(angle_deg10);
+  int16_t  left;
+  int16_t  right;
+  uint16_t comp_x1000;
+
+  if (Car_ActionBegin(CAR_ACT_ANGLE, direction) == 0U)
+  {
+    printf("[ANGLE] rejected: action %u already running\r\n",
+           (unsigned)car_action.kind);
+    return CAR_ACTION_FAILED;
+  }
+
+  if (magnitude == 0U)
+  {
+    return Car_ActionFinish(CAR_ACTION_FAILED);
+  }
+
+#if CAR_ANGLE_COMP_ENABLE
+  /* 滑移补偿表只在 CAR_ANGLE_MIN_SPEED 以上标定过，低速原地旋转不接受。 */
+  if ((radius_mm == 0U) && (speed < CAR_ANGLE_MIN_SPEED))
+  {
+    printf("[ANGLE] rejected: speed %u < calibrated minimum %u\r\n",
+           (unsigned)speed, (unsigned)CAR_ANGLE_MIN_SPEED);
+    return Car_ActionFinish(CAR_ACTION_FAILED);
+  }
+#endif
+
+  if (Car_AngleWheelSpeeds(speed, radius_mm, direction, &left, &right) == 0U)
+  {
+    return Car_ActionFinish(CAR_ACTION_FAILED);
   }
 
   comp_x1000 = Car_AngleCompX1000(speed, radius_mm, direction);
-  encoder_target_deg10 = (uint32_t)(((uint64_t)angle_deg10 * comp_x1000
-                                      + 500ULL) / 1000ULL);
+  car_action.target_angle_deg10 =
+      (uint32_t)(((uint64_t)magnitude * comp_x1000 + 500ULL) / 1000ULL);
 
-  Encoder_ResetAll();
-  start_tick = HAL_GetTick();
-  last_report_tick = start_tick;
   printf("[ANGLE] start dir=%s real=%lu.%01lu deg encoder=%lu.%01lu deg "
          "comp=%u.%03u radius=%umm speed=%u\r\n",
          (direction > 0) ? "left" : "right",
-         (unsigned long)(angle_deg10 / 10U),
-         (unsigned long)(angle_deg10 % 10U),
-         (unsigned long)(encoder_target_deg10 / 10U),
-         (unsigned long)(encoder_target_deg10 % 10U),
+         (unsigned long)(magnitude / 10U),
+         (unsigned long)(magnitude % 10U),
+         (unsigned long)(car_action.target_angle_deg10 / 10U),
+         (unsigned long)(car_action.target_angle_deg10 % 10U),
          (unsigned)(comp_x1000 / 1000U),
          (unsigned)(comp_x1000 % 1000U),
          (unsigned)radius_mm,
          (unsigned)speed);
   Car_Drive(left, right);
+  return CAR_ACTION_BUSY;
+}
 
-  while (1)
+Car_ActionStatus Car_StartRotateAngle(uint8_t speed, int32_t angle_deg10)
+{
+  return Car_StartTurnAngle(speed, 0U, angle_deg10);
+}
+
+Car_ActionStatus Car_StartTimed(int16_t left, int16_t right, uint16_t time)
+{
+  if (Car_ActionBegin(CAR_ACT_TIMED, 1) == 0U)
   {
-    uint32_t now = HAL_GetTick();
-    int32_t angle = Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM);
-    uint32_t turned = (angle >= 0)
-                        ? (uint32_t)angle
-                        : (uint32_t)(-(int64_t)angle);
+    return CAR_ACTION_FAILED;
+  }
 
-    if (turned >= encoder_target_deg10)
-    {
-      break;
-    }
-    if ((uint32_t)(now - start_tick) >= CAR_DISTANCE_TIMEOUT_MS)
-    {
-      printf("[ANGLE] timeout\r\n");
-      break;
-    }
-    if ((uint32_t)(now - last_report_tick) >= 500U)
-    {
-      last_report_tick = now;
-      printf("[ANGLE %lums] left=%ldmm right=%ldmm angle=%ld.%01lddeg\r\n",
-             (unsigned long)(now - start_tick),
-             (long)Encoder_GetDistanceLeft(),
-             (long)Encoder_GetDistanceRight(),
-             (long)(angle / 10),
-             (long)(angle >= 0 ? angle % 10 : -angle % 10));
-    }
-    HAL_Delay(1U);
+  car_action.duration_ms = time;
+  /* 纯计时动作不依赖编码器，duration 到点必然完成，超时上限留一点余量即可。 */
+  car_action.timeout_ms  = (uint32_t)time + CAR_ACTION_TIMEOUT_MARGIN_MS;
+
+  if (time == 0U)
+  {
+    return Car_ActionFinish(CAR_ACTION_DONE);
+  }
+
+  Car_DriveSpeed(left, right);
+  return CAR_ACTION_BUSY;
+}
+
+Car_ActionStatus Car_StartForwardVary(uint8_t speed_from, uint8_t speed_to,
+                                      uint16_t time)
+{
+  if (Car_ActionBegin(CAR_ACT_RAMP, 1) == 0U)
+  {
+    return CAR_ACTION_FAILED;
+  }
+
+  car_action.ramp_from_eff = (int16_t)Car_ToEff(speed_from);
+  car_action.ramp_to_eff   = (int16_t)Car_ToEff(speed_to);
+  car_action.duration_ms   = time;
+  car_action.timeout_ms    = (uint32_t)time + CAR_ACTION_TIMEOUT_MARGIN_MS;
+
+  if (time == 0U)
+  {
+    return Car_ActionFinish(CAR_ACTION_DONE);
+  }
+
+  Car_Drive(car_action.ramp_from_eff, car_action.ramp_from_eff);
+  return CAR_ACTION_BUSY;
+}
+
+Car_ActionStatus Car_StartBrake(uint16_t time)
+{
+  if (Car_ActionBegin(CAR_ACT_BRAKE, 1) == 0U)
+  {
+    return CAR_ACTION_FAILED;
   }
 
   Motor_BrakeAll();
-  printf("[ANGLE] stop left=%ldmm right=%ldmm angle=%ld.%01lddeg\r\n",
-         (long)Encoder_GetDistanceLeft(),
-         (long)Encoder_GetDistanceRight(),
-         (long)(Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM) / 10),
-         (long)(Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM) >= 0
-                  ? Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM) % 10
-                  : -Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM) % 10));
+  car_action.duration_ms = time;
+  car_action.timeout_ms  = (uint32_t)time + CAR_ACTION_TIMEOUT_MARGIN_MS;
+
+  if (time == 0U)
+  {
+    return Car_ActionFinish(CAR_ACTION_DONE);
+  }
+  return CAR_ACTION_BUSY;
+}
+
+/**
+  * @brief  推进 DISTANCE 动作一步
+  */
+static Car_ActionStatus Car_StepDistance(uint32_t now)
+{
+  int32_t  distance  = Encoder_GetDistanceAvg() - car_action.start_distance_mm;
+  uint32_t travelled = (uint32_t)Car_Abs32(distance);
+
+  if (travelled >= car_action.target_distance_mm)
+  {
+    printf("[DIST] stop travelled=%lumm\r\n", (unsigned long)travelled);
+    return Car_ActionFinish(CAR_ACTION_DONE);
+  }
+
+  if ((uint32_t)(now - car_action.last_report_tick) >= CAR_ACTION_REPORT_MS)
+  {
+    car_action.last_report_tick = now;
+    printf("[DIST %lums] count=%ld,%ld,%ld,%ld travelled=%ldmm rpm=%d,%d,%d,%d\r\n",
+           (unsigned long)(now - car_action.start_tick),
+           (long)Encoder_GetCount(MOTOR_1),
+           (long)Encoder_GetCount(MOTOR_2),
+           (long)Encoder_GetCount(MOTOR_3),
+           (long)Encoder_GetCount(MOTOR_4),
+           (long)distance,
+           (int)Encoder_GetSpeedRpm(MOTOR_1),
+           (int)Encoder_GetSpeedRpm(MOTOR_2),
+           (int)Encoder_GetSpeedRpm(MOTOR_3),
+           (int)Encoder_GetSpeedRpm(MOTOR_4));
+  }
+  return CAR_ACTION_BUSY;
+}
+
+/**
+  * @brief  推进 ANGLE 动作一步
+  */
+static Car_ActionStatus Car_StepAngle(uint32_t now)
+{
+  int32_t  angle  = Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM)
+                    - car_action.start_angle_deg10;
+  uint32_t turned = (uint32_t)Car_Abs32(angle);
+
+  if (turned >= car_action.target_angle_deg10)
+  {
+    printf("[ANGLE] stop turned=%ld.%01lddeg\r\n",
+           (long)(angle / 10), (long)(Car_Abs32(angle) % 10));
+    return Car_ActionFinish(CAR_ACTION_DONE);
+  }
+
+  if ((uint32_t)(now - car_action.last_report_tick) >= CAR_ACTION_REPORT_MS)
+  {
+    car_action.last_report_tick = now;
+    printf("[ANGLE %lums] left=%ldmm right=%ldmm angle=%ld.%01lddeg\r\n",
+           (unsigned long)(now - car_action.start_tick),
+           (long)Encoder_GetDistanceLeft(),
+           (long)Encoder_GetDistanceRight(),
+           (long)(angle / 10),
+           (long)(Car_Abs32(angle) % 10));
+  }
+  return CAR_ACTION_BUSY;
+}
+
+/**
+  * @brief  推进 RAMP 动作一步
+  * @note   按已用时间比例插值，取代原先每 CAR_RAMP_STEP_MS 一次 HAL_Delay
+  *         的写法。插值仍在有效速度刻度上做，加速度保持恒定。
+  */
+static Car_ActionStatus Car_StepRamp(uint32_t elapsed)
+{
+  int16_t v0 = car_action.ramp_from_eff;
+  int16_t v1 = car_action.ramp_to_eff;
+  int16_t v;
+
+  if (elapsed >= (uint32_t)car_action.duration_ms)
+  {
+    return Car_ActionFinish(CAR_ACTION_DONE);
+  }
+
+  v = (int16_t)(v0 + (int32_t)(v1 - v0) * (int32_t)elapsed
+                     / (int32_t)car_action.duration_ms);
+  Car_Drive(v, v);
+  return CAR_ACTION_BUSY;
+}
+
+Car_ActionStatus Car_ActionStep(void)
+{
+  uint32_t now;
+  uint32_t elapsed;
+
+  if (car_action.kind == CAR_ACT_NONE)
+  {
+    return CAR_ACTION_IDLE;
+  }
+
+  now     = HAL_GetTick();
+  elapsed = (uint32_t)(now - car_action.start_tick);
+
+  /* 超时保护先判：编码器没有脉冲时到期制动，防止一直运行。 */
+  if (elapsed >= car_action.timeout_ms)
+  {
+    printf("[CAR] action %u timeout after %lums\r\n",
+           (unsigned)car_action.kind, (unsigned long)elapsed);
+    return Car_ActionFinish(CAR_ACTION_TIMEOUT);
+  }
+
+  switch (car_action.kind)
+  {
+    case CAR_ACT_DISTANCE:
+      return Car_StepDistance(now);
+
+    case CAR_ACT_ANGLE:
+      return Car_StepAngle(now);
+
+    case CAR_ACT_RAMP:
+      return Car_StepRamp(elapsed);
+
+    case CAR_ACT_TIMED:
+    case CAR_ACT_BRAKE:
+      if (elapsed >= (uint32_t)car_action.duration_ms)
+      {
+        return Car_ActionFinish(CAR_ACTION_DONE);
+      }
+      return CAR_ACTION_BUSY;
+
+    default:
+      return Car_ActionFinish(CAR_ACTION_FAILED);
+  }
+}
+
+void Car_ActionAbort(void)
+{
+  if (car_action.kind != CAR_ACT_NONE)
+  {
+    printf("[CAR] action %u aborted\r\n", (unsigned)car_action.kind);
+    (void)Car_ActionFinish(CAR_ACTION_IDLE);
+  }
+}
+
+Car_ActionStatus Car_GetActionStatus(void)
+{
+  return (car_action.kind == CAR_ACT_NONE) ? CAR_ACTION_IDLE : CAR_ACTION_BUSY;
+}
+
+uint8_t Car_IsActionBusy(void)
+{
+  return (car_action.kind != CAR_ACT_NONE) ? 1U : 0U;
+}
+
+/**
+  * @brief  直接指定左右两侧速度
+  * @param  left/right: 占空比刻度 -100~100，正数向前
+  * @note   供循迹差速修正和遥控手动转向使用。入参是占空比刻度而非有效速度，
+  *         内部负责死区换算，调用方不必了解 CAR_SPEED_BASE。
+  */
+void Car_DriveSpeed(int16_t left, int16_t right)
+{
+  /* 先夹到 ±MOTOR_SPEED_MAX，再交给 Car_ToEff 做死区换算。不夹的话
+     超范围的入参转 uint8_t 会截断，符号还在、数值却绕回去。 */
+  int16_t lc = (left  >  (int16_t)MOTOR_SPEED_MAX) ?  (int16_t)MOTOR_SPEED_MAX
+             : (left  < -(int16_t)MOTOR_SPEED_MAX) ? -(int16_t)MOTOR_SPEED_MAX
+                                                   : left;
+  int16_t rc = (right >  (int16_t)MOTOR_SPEED_MAX) ?  (int16_t)MOTOR_SPEED_MAX
+             : (right < -(int16_t)MOTOR_SPEED_MAX) ? -(int16_t)MOTOR_SPEED_MAX
+                                                   : right;
+
+  int16_t le = (lc >= 0) ? (int16_t)Car_ToEff((uint8_t)lc)
+                         : (int16_t)(-(int16_t)Car_ToEff((uint8_t)(-lc)));
+  int16_t re = (rc >= 0) ? (int16_t)Car_ToEff((uint8_t)rc)
+                         : (int16_t)(-(int16_t)Car_ToEff((uint8_t)(-rc)));
+
+  Car_Drive(le, re);
 }
 
 /**
@@ -380,6 +712,7 @@ static void Car_RunAngle(uint8_t speed, uint16_t radius_mm,
 void Car_Init(void)
 {
   Motor_Init();
+  car_action.kind = CAR_ACT_NONE;
 }
 
 /**
@@ -457,27 +790,7 @@ void Car_BackwardDistance(uint8_t speed, uint32_t distance_mm)
   */
 void Car_ForwardVary(uint8_t speed_from, uint8_t speed_to, uint16_t time)
 {
-  int16_t  v0    = (int16_t)Car_ToEff(speed_from);
-  int16_t  v1    = (int16_t)Car_ToEff(speed_to);
-  uint16_t steps = (uint16_t)(time / CAR_RAMP_STEP_MS);
-
-  for (uint16_t i = 1U; i <= steps; i++)
-  {
-    /* v0 + (v1-v0)·i/steps，整数运算先乘后除保精度 */
-    int16_t v = (int16_t)(v0 + (int32_t)(v1 - v0) * (int32_t)i / (int32_t)steps);
-
-    Car_Drive(v, v);
-    HAL_Delay(CAR_RAMP_STEP_MS);
-  }
-
-  /* 不足一个步长的零头（含 time < CAR_RAMP_STEP_MS 的情况）按末速补齐 */
-  if ((uint16_t)(time % CAR_RAMP_STEP_MS) > 0U)
-  {
-    Car_Drive(v1, v1);
-    HAL_Delay((uint16_t)(time % CAR_RAMP_STEP_MS));
-  }
-
-  Motor_BrakeAll();
+  (void)Car_RunToCompletion(Car_StartForwardVary(speed_from, speed_to, time));
 }
 
 /**
@@ -578,6 +891,10 @@ void Car_Brake(uint16_t time)
     HAL_Delay(time);
   }
 }
+
+/* 说明：Car_Brake() 保持原样（直接制动 + 阻塞等待），因为它常被用作"立即停车"
+   的同义词，改成状态机会让 Car_Brake(0) 之类的调用多绕一圈。需要非阻塞制动
+   保持的场合用 Car_StartBrake()。 */
 
 /**
   * @brief  走一个三叶草轨迹

@@ -1,3 +1,18 @@
+/**
+  ******************************************************************************
+  * @file    ir_avoid.h
+  * @brief   双路红外避障传感器
+  ******************************************************************************
+  * @note    **本模块只是传感器。** 它采样、判阈值、判迟滞、产生障碍事件，
+  *          不驱动底盘、不控制蜂鸣和 RGB。避障动作在 avoid_task。
+  *
+  *          原实现里 IrAvoid_Handle() 既采样又直接调 Car_BackwardDistance() /
+  *          Car_RotateRightAngle()，传感器兼执行器，违反分层，已移除。
+  *
+  *          采样不再用 HAL_Delay 等发射管稳定：改成相位状态机，
+  *          IrAvoid_Sense() 每轮推进一相，全程非阻塞。
+  ******************************************************************************
+  */
 #ifndef __IR_AVOID_H__
 #define __IR_AVOID_H__
 
@@ -41,22 +56,31 @@ typedef enum
 #define IR_AVOID_REPORT_PERIOD_MS     500U
 
 void IrAvoid_Init(void);
-void IrAvoid_Update(void);
 
 /*
- * 执行一次避障仲裁。
- * 返回 1：本次检测到障碍并已执行/正在执行避障动作，调用方不得驱动底盘；
- * 返回 0：当前无障碍，调用方可以运行默认行为（例如循迹）。
+ * 推进采样状态机一步，非阻塞。状态发生变化时投递 EVENT_OBSTACLE_*。
+ * 每轮主循环调用。
  */
-uint8_t IrAvoid_Handle(void);
+void IrAvoid_Sense(void);
+
+/* 强制丢弃当前采样进度，下一轮重新开始一轮完整采样。
+   避障动作结束后调用，确保拿到的是动作后的新数据而不是动作前的残留。 */
+void IrAvoid_Restart(void);
 
 IrAvoid_State IrAvoid_GetState(void);
-uint8_t IrAvoid_IsLeftBlocked(void);
-uint8_t IrAvoid_IsRightBlocked(void);
-uint8_t IrAvoid_IsAnyBlocked(void);
+uint8_t  IrAvoid_IsLeftBlocked(void);
+uint8_t  IrAvoid_IsRightBlocked(void);
+uint8_t  IrAvoid_IsAnyBlocked(void);
 uint16_t IrAvoid_GetLeftRaw(void);
 uint16_t IrAvoid_GetRightRaw(void);
+
+/* 一轮完整采样是否已完成过至少一次（数据是否可信）。 */
+uint8_t IrAvoid_HasSample(void);
+
 const char *IrAvoid_StateName(IrAvoid_State state);
+
+/* 阻塞式单次采样，仅供独立标定使用，不要在正式主循环调用。 */
+void IrAvoid_UpdateBlocking(void);
 
 #ifdef __cplusplus
 }

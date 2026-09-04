@@ -38,6 +38,12 @@
 #include "ultrasonic_avoid.h"
 #include "vision_uart.h"
 #include "vision_task.h"
+#include "event.h"
+#include "scheduler.h"
+#include "manual_task.h"
+#include "avoid_task.h"
+#include "indicator.h"
+#include "ultrasonic_sense.h"
 
 #include <stdio.h>
 
@@ -116,6 +122,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(led1_GPIO_Port, led1_Pin, GPIO_PIN_SET);
     HAL_GPIO_WritePin(led2_GPIO_Port, led2_Pin, GPIO_PIN_RESET);
+
+    /* Key3 兼作急停。中断里只投事件，不做动作。 */
+    if (GPIO_Pin == key3_Pin)
+    {
+      (void)Event_Post(EVENT_KEY_STOP, 0U);
+    }
   }
   else if (GPIO_Pin == key2_Pin)
   {
@@ -124,6 +136,9 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(led1_GPIO_Port, led1_Pin, GPIO_PIN_RESET);
     HAL_GPIO_WritePin(led2_GPIO_Port, led2_Pin, GPIO_PIN_SET);
+
+    /* Key2 兼作启动。 */
+    (void)Event_Post(EVENT_KEY_START, 0U);
   }
 }
 
@@ -237,8 +252,15 @@ int main(void)
   IrRemoteDebug_Init();
   Ultrasonic_Init();
   UltrasonicAvoid_Init();
+  /* 事件队列必须在任何可能投递事件的模块之前初始化。 */
+  Event_Init();
+  Indicator_Init();
   VisionUart_Init();
   VisionTask_Init();
+  ManualTask_Init();
+  UltrasonicSense_Init();
+  AvoidTask_Init();
+  Scheduler_Init();
 
   /* USER CODE END 2 */
 
@@ -266,31 +288,52 @@ int main(void)
     // Car_TurnRightAngle(100U, 150U, 3600U); /* 半径 150mm 右转 90.0° */
     
 
-    /* 视觉任务优先；空闲时按当前巡线速度直行。
-       后续接入循迹时，把 Car_ForwardRun() 换成 LineTracker_Step()。 */
-    if (VisionTask_Handle() == 0U)
-    {
-      Car_ForwardRun(VisionTask_GetSpeed());
-      /* LineTracker_Step(); */
-    }
-    HAL_Delay(1U);
+    /* ==== 正式主循环：采样 → 调度 → 分派 → 诊断 ====================
+       循环里没有 HAL_Delay，每轮都能重新仲裁优先级。同一周期只有
+       Scheduler_Dispatch() 选中的那一个模块会写电机。 */
 
-    /* 视觉接收诊断：每秒输出 UART2 字节计数与错误信息。 */
+    /* 1. 采样层：识别模块只产生事件，不驱动底盘。
+          遥控必须每轮采样——RED 双击是进入手动模式的唯一入口。
+          视觉帧由 UART2 中断直接投递事件，这里无需轮询。 */
+    ManualTask_Sense();
+    IrAvoid_Sense();
+    UltrasonicSense_Sense();
+
+    /* 2. 调度层：消费事件，决定控制模式。 */
+    Scheduler_DrainEvents();
+
+    /* 3. 分派：本轮只有一个模块获得底盘控制权。 */
+    Scheduler_Dispatch();
+
+    /* 4. 指示层：按优先级裁决蜂鸣与 RGB，各模块只申请不直写。 */
+    Indicator_Step();
+
+    /* 5. 诊断：按 tick 判周期，绝不每轮都 printf。 */
     {
       static uint32_t last_vision_debug_tick;
       uint32_t now = HAL_GetTick();
       if ((uint32_t)(now - last_vision_debug_tick) >= 1000U)
       {
         last_vision_debug_tick = now;
-        printf("[VISION RX] count=%lu last=0x%02X errors=%lu error_code=0x%08lX\r\n",
+        printf("[DIAG] mode=%s speed=%u ir=%s front=%umm | RX count=%lu "
+               "last=0x%02X errors=%lu code=0x%08lX | EVT posted=%lu "
+               "dropped=%lu\r\n",
+               Scheduler_ModeName(Scheduler_GetMode()),
+               (unsigned)VisionTask_GetSpeed(),
+               IrAvoid_StateName(IrAvoid_GetState()),
+               (unsigned)UltrasonicSense_GetLastMm(),
                (unsigned long)VisionUart_GetRxCount(),
                (unsigned)VisionUart_GetLastByte(),
                (unsigned long)VisionUart_GetErrorCount(),
-               (unsigned long)VisionUart_GetLastError());
+               (unsigned long)VisionUart_GetLastError(),
+               (unsigned long)Event_GetPostedCount(),
+               (unsigned long)Event_GetDroppedCount());
       }
     }
 
-    /* 当前调试超声波避障；无障碍时保持直线行驶。 */
+    /* 超声波避障已并入 avoid_task（阶段 4），正式路径由调度器驱动。
+       旧的 UltrasonicAvoid_Handle() 保留为独立调试入口，但它直写 RGB 和
+       蜂鸣器、绕过指示层，启用时会和正式告警互相覆盖。 */
     // if (UltrasonicAvoid_Handle() == 0U)
     // {
     //   Car_ForwardRun(70U);
@@ -300,10 +343,10 @@ int main(void)
     /* 红外遥控与 OLED 调试，需要时单独启用。 */
     // IrRemoteDebug_Update();
 
-    /* 红外避障诊断：每 20ms 采样，串口输出左右原始 ADC 与状态。
-       正式避障运行时由 IrAvoid_Handle() 内部调用；需要单独诊断时可改为：
-       IrAvoid_Update(); */
-    // IrAvoid_Update();
+    /* 红外避障诊断：正式路径已由上面的 IrAvoid_Sense() 非阻塞采样，
+       状态变化时自动投事件。需要阻塞式单次采样标定阈值时用：
+       IrAvoid_UpdateBlocking(); */
+    // IrAvoid_UpdateBlocking();
 
     /* 四路红外黑线循迹（集成避障时使用 LineTracker_Step()，不要使用
        内部无限循环的 LineTracker_Run()）。独立循迹调试时可单独启用： */
