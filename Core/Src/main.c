@@ -36,6 +36,8 @@
 #include "ultrasonic.h"
 #include "ir_remote_debug.h"
 #include "ultrasonic_avoid.h"
+#include "vision_uart.h"
+#include "vision_task.h"
 
 #include <stdio.h>
 
@@ -197,15 +199,16 @@ int main(void)
 
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
-  MX_ADC3_Init();
   MX_TIM1_Init();
   MX_TIM8_Init();
   MX_TIM2_Init();
   MX_TIM3_Init();
   MX_TIM4_Init();
   MX_TIM5_Init();
-    MX_USART1_UART_Init();
+  MX_USART1_UART_Init();
   MX_I2C1_Init();
+  MX_ADC3_Init();
+  MX_USART2_UART_Init();
   /* USER CODE BEGIN 2 */
 
   /* Initialize LED2 as on (buzzer is off by default) */
@@ -234,6 +237,8 @@ int main(void)
   IrRemoteDebug_Init();
   Ultrasonic_Init();
   UltrasonicAvoid_Init();
+  VisionUart_Init();
+  VisionTask_Init();
 
   /* USER CODE END 2 */
 
@@ -261,12 +266,36 @@ int main(void)
     // Car_TurnRightAngle(100U, 150U, 3600U); /* 半径 150mm 右转 90.0° */
     
 
-            /* 当前调试超声波避障；无障碍时保持直线行驶。 */
-    if (UltrasonicAvoid_Handle() == 0U)
+    /* 视觉任务优先；空闲时按当前巡线速度直行。
+       后续接入循迹时，把 Car_ForwardRun() 换成 LineTracker_Step()。 */
+    if (VisionTask_Handle() == 0U)
     {
-      Car_ForwardRun(70U);
+      Car_ForwardRun(VisionTask_GetSpeed());
+      /* LineTracker_Step(); */
     }
     HAL_Delay(1U);
+
+    /* 视觉接收诊断：每秒输出 UART2 字节计数与错误信息。 */
+    {
+      static uint32_t last_vision_debug_tick;
+      uint32_t now = HAL_GetTick();
+      if ((uint32_t)(now - last_vision_debug_tick) >= 1000U)
+      {
+        last_vision_debug_tick = now;
+        printf("[VISION RX] count=%lu last=0x%02X errors=%lu error_code=0x%08lX\r\n",
+               (unsigned long)VisionUart_GetRxCount(),
+               (unsigned)VisionUart_GetLastByte(),
+               (unsigned long)VisionUart_GetErrorCount(),
+               (unsigned long)VisionUart_GetLastError());
+      }
+    }
+
+    /* 当前调试超声波避障；无障碍时保持直线行驶。 */
+    // if (UltrasonicAvoid_Handle() == 0U)
+    // {
+    //   Car_ForwardRun(70U);
+    // }
+    // HAL_Delay(1U);
 
     /* 红外遥控与 OLED 调试，需要时单独启用。 */
     // IrRemoteDebug_Update();
@@ -371,3 +400,4 @@ void assert_failed(uint8_t *file, uint32_t line)
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */
+
