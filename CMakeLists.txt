@@ -50,6 +50,12 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/retarget.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/line_tracker.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ir_avoid.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/oled.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ir_remote.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ultrasonic.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ir_remote_debug.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ir_remote_map.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ultrasonic_avoid.c
 )
 
 # Add include paths

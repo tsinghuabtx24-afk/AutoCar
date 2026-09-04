@@ -31,6 +31,11 @@
 #include "ir_avoid.h"
 #include "line_tracker.h"
 #include "retarget.h"
+#include "oled.h"
+#include "ir_remote.h"
+#include "ultrasonic.h"
+#include "ir_remote_debug.h"
+#include "ultrasonic_avoid.h"
 
 #include <stdio.h>
 
@@ -100,6 +105,8 @@ void RGB_SetColor(uint8_t r, uint8_t g, uint8_t b)
   */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+  IrRemote_EXTI_Callback(GPIO_Pin);
+
   if (GPIO_Pin == key1_Pin || GPIO_Pin == key3_Pin)
   {
     /* Key1 or Key3 pressed: turn on buzzer */
@@ -220,8 +227,13 @@ int main(void)
        Encoder_GetCount(MOTOR_1)   四路计数，前进时应全为正
        Encoder_GetDistanceAvg()    车体里程 mm
        Encoder_GetSpeedRpm(...)    轮子转速 rpm */
-  Encoder_Init();
+    Encoder_Init();
   IrAvoid_Init();
+    Oled_Init();
+  IrRemote_Init();
+  IrRemoteDebug_Init();
+  Ultrasonic_Init();
+  UltrasonicAvoid_Init();
 
   /* USER CODE END 2 */
 
@@ -249,14 +261,15 @@ int main(void)
     // Car_TurnRightAngle(100U, 150U, 3600U); /* 半径 150mm 右转 90.0° */
     
 
-    /* 红外模块优先；无障碍时先保持直线行驶。后续接入循迹时，将下面的 Car_ForwardRun() 替换为 LineTracker_Step()，
-    不要调用 LineTracker_Run()，因为 Run() 内部有无限循环，会阻塞上层仲裁。 */
-    if (IrAvoid_Handle() == 0U)
+            /* 当前调试超声波避障；无障碍时保持直线行驶。 */
+    if (UltrasonicAvoid_Handle() == 0U)
     {
       Car_ForwardRun(70U);
-      /* LineTracker_Step(); */
     }
     HAL_Delay(1U);
+
+    /* 红外遥控与 OLED 调试，需要时单独启用。 */
+    // IrRemoteDebug_Update();
 
     /* 红外避障诊断：每 20ms 采样，串口输出左右原始 ADC 与状态。
        正式避障运行时由 IrAvoid_Handle() 内部调用；需要单独诊断时可改为：
