@@ -77,17 +77,17 @@ extern "C" {
    极左/极右图案时启用。速度取值与 car 的滑移补偿无关——这里不按角度停，
    而是边转边看传感器，压回线就退出，所以不需要 CAR_ANGLE_MIN_SPEED 限制。
    ============================================================================ */
-#define LINE_PIVOT_SPEED         70U
+#define LINE_PIVOT_SPEED         90U
 
 /* 原地转的超时保护。转这么久还没压回线就判丢线并制动。 */
-#define LINE_PIVOT_TIMEOUT_MS    1500U
+#define LINE_PIVOT_TIMEOUT_MS    2500U
 
 /* ==== 丢线保护 ==============================================================
    连续这么多个控制周期读到全白（0x0F）判定丢线，制动并投 EVENT_FAULT。
    原实现的 LINE_STOP_ON_UNKNOWN 只覆盖单次未定义图案，没有持续判定，
    车会带着上次轮速继续冲。
    ============================================================================ */
-#define LINE_LOST_COUNT          20U
+#define LINE_LOST_COUNT          200U
 
 /* 未定义图案是否立即停车。保留原有开关。 */
 #define LINE_STOP_ON_UNKNOWN     1U
