@@ -43,6 +43,13 @@ typedef enum
 void IrAvoid_Init(void);
 void IrAvoid_Update(void);
 
+/*
+ * 执行一次避障仲裁。
+ * 返回 1：本次检测到障碍并已执行/正在执行避障动作，调用方不得驱动底盘；
+ * 返回 0：当前无障碍，调用方可以运行默认行为（例如循迹）。
+ */
+uint8_t IrAvoid_Handle(void);
+
 IrAvoid_State IrAvoid_GetState(void);
 uint8_t IrAvoid_IsLeftBlocked(void);
 uint8_t IrAvoid_IsRightBlocked(void);

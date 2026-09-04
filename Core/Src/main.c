@@ -249,11 +249,22 @@ int main(void)
     // Car_TurnRightAngle(100U, 150U, 3600U); /* 半径 150mm 右转 90.0° */
     
 
-         /* 红外避障诊断：每 20ms 采样，串口输出左右原始 ADC 与状态 */
-    IrAvoid_Update();
+    /* 红外模块优先；无障碍时先保持直线行驶。后续接入循迹时，将下面的 Car_ForwardRun() 替换为 LineTracker_Step()，
+    不要调用 LineTracker_Run()，因为 Run() 内部有无限循环，会阻塞上层仲裁。 */
+    if (IrAvoid_Handle() == 0U)
+    {
+      Car_ForwardRun(70U);
+      /* LineTracker_Step(); */
+    }
     HAL_Delay(1U);
 
-    /* 四路红外黑线循迹（需要循迹时取消注释，并注释上面的避障诊断） */
+    /* 红外避障诊断：每 20ms 采样，串口输出左右原始 ADC 与状态。
+       正式避障运行时由 IrAvoid_Handle() 内部调用；需要单独诊断时可改为：
+       IrAvoid_Update(); */
+    // IrAvoid_Update();
+
+    /* 四路红外黑线循迹（集成避障时使用 LineTracker_Step()，不要使用
+       内部无限循环的 LineTracker_Run()）。独立循迹调试时可单独启用： */
     // LineTracker_Run();
 
     /* 变速直线：先加速再减速，走一个梭形速度曲线 */

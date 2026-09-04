@@ -1,14 +1,24 @@
 #include "ir_avoid.h"
 #include "adc.h"
+#include "car.h"
 #include "retarget.h"
 
 #include <stdio.h>
+
+/* 独立于 main 的红外避障执行参数。 */
+#define IR_AVOID_FORWARD_SPEED       70U
+#define IR_AVOID_REVERSE_SPEED       70U
+#define IR_AVOID_ROTATE_SPEED        80U
+#define IR_AVOID_REVERSE_DISTANCE_MM 50U
+#define IR_AVOID_ROTATE_ANGLE_DEG10  300U
+#define IR_AVOID_RGB_PERIOD_MS       200U
 
 static IrAvoid_State ir_state;
 static uint16_t ir_left_raw;
 static uint16_t ir_right_raw;
 static uint32_t ir_last_update;
 static uint32_t ir_last_report;
+static uint32_t ir_random_state = 0xA5C31F27UL;
 
 static uint16_t IrAvoid_ReadChannel(uint32_t channel)
 {
@@ -62,6 +72,8 @@ void IrAvoid_Init(void)
   ir_right_raw = 0U;
   ir_last_update = 0U;
   ir_last_report = 0U;
+  HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
+  RGB_SetColor(0U, 0U, 0U);
   printf("[IR] init: PF9=left PF10=right threshold=%u\r\n",
          (unsigned)IR_AVOID_LEFT_THRESHOLD);
 }
@@ -126,4 +138,120 @@ const char *IrAvoid_StateName(IrAvoid_State state)
     case IR_AVOID_BOTH: return "BOTH";
     default: return "CLEAR";
   }
+}
+
+static void IrAvoid_UpdateAlert(IrAvoid_State state)
+{
+  static uint32_t last_blink_tick;
+  static uint8_t blink_on;
+  static IrAvoid_State last_alert_state = IR_AVOID_CLEAR;
+  uint32_t now = HAL_GetTick();
+
+  if (state == IR_AVOID_CLEAR)
+  {
+    blink_on = 0U;
+    HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_RESET);
+    RGB_SetColor(0U, 0U, 0U);
+  }
+  else
+  {
+    HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin, GPIO_PIN_SET);
+
+    if (state != last_alert_state)
+    {
+      blink_on = 1U;
+      last_blink_tick = now;
+    }
+    else if ((uint32_t)(now - last_blink_tick) >= IR_AVOID_RGB_PERIOD_MS)
+    {
+      blink_on = (blink_on == 0U) ? 1U : 0U;
+      last_blink_tick = now;
+    }
+
+    /* RGB_SetColor 的实际映射：g 控制左侧红色，r 控制右侧红色。 */
+    RGB_SetColor(
+        (uint8_t)(blink_on != 0U &&
+                  (state == IR_AVOID_RIGHT || state == IR_AVOID_BOTH)),
+        (uint8_t)(blink_on != 0U &&
+                  (state == IR_AVOID_LEFT || state == IR_AVOID_BOTH)),
+        0U);
+  }
+
+  last_alert_state = state;
+}
+
+static uint8_t IrAvoid_RandomBit(void)
+{
+  /* 软件伪随机：加入时间和 ADC 采样值，避免每次上电方向完全固定。 */
+  ir_random_state ^= HAL_GetTick();
+  ir_random_state ^= ((uint32_t)ir_left_raw << 16) | ir_right_raw;
+  ir_random_state ^= ir_random_state << 13;
+  ir_random_state ^= ir_random_state >> 17;
+  ir_random_state ^= ir_random_state << 5;
+  return (uint8_t)(ir_random_state & 1U);
+}
+
+static void IrAvoid_RotateAway(IrAvoid_State state)
+{
+  if (state == IR_AVOID_LEFT)
+  {
+    /* 左侧有障碍，向右旋转。 */
+    Car_RotateRightAngle(IR_AVOID_ROTATE_SPEED, IR_AVOID_ROTATE_ANGLE_DEG10);
+  }
+  else if (state == IR_AVOID_RIGHT)
+  {
+    /* 右侧有障碍，向左旋转。 */
+    Car_RotateLeftAngle(IR_AVOID_ROTATE_SPEED, IR_AVOID_ROTATE_ANGLE_DEG10);
+  }
+}
+
+uint8_t IrAvoid_Handle(void)
+{
+  IrAvoid_State state;
+
+  IrAvoid_Update();
+  state = IrAvoid_GetState();
+  IrAvoid_UpdateAlert(state);
+
+  if (state == IR_AVOID_CLEAR)
+  {
+    IrAvoid_UpdateAlert(IR_AVOID_CLEAR);
+    return 0U;
+  }
+
+  Car_Stop();
+  /* 告警只覆盖本次避障动作，不因障碍仍在视野内而持续占用告警。 */
+  IrAvoid_UpdateAlert(state);
+
+  if (state == IR_AVOID_BOTH)
+  {
+    Car_BackwardDistance(IR_AVOID_REVERSE_SPEED,
+                         IR_AVOID_REVERSE_DISTANCE_MM);
+    /* 后退动作可能恰好未跨过采样周期，强制重新采样左右 ADC。 */
+    ir_last_update = 0U;
+    IrAvoid_Update();
+    state = IrAvoid_GetState();
+    IrAvoid_UpdateAlert(state);
+
+    /* 后退后必须先随机转向 30°，不根据此刻的左右状态改变这一次转向。 */
+    IrAvoid_UpdateAlert(IR_AVOID_BOTH);
+    if (IrAvoid_RandomBit() != 0U)
+    {
+      Car_RotateLeftAngle(IR_AVOID_ROTATE_SPEED, IR_AVOID_ROTATE_ANGLE_DEG10);
+    }
+    else
+    {
+      Car_RotateRightAngle(IR_AVOID_ROTATE_SPEED, IR_AVOID_ROTATE_ANGLE_DEG10);
+    }
+    IrAvoid_UpdateAlert(IR_AVOID_CLEAR);
+    /* 转向结束后下一轮再重新检测。 */
+    ir_last_update = 0U;
+    return 1U;
+  }
+
+  IrAvoid_RotateAway(state);
+  IrAvoid_UpdateAlert(IR_AVOID_CLEAR);
+  /* 下一次 Handle 必须重新采样，判断旋转后障碍是否仍存在。 */
+  ir_last_update = 0U;
+  return 1U;
 }
