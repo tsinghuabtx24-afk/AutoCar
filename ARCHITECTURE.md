@@ -33,11 +33,9 @@ STM32F103 智能小车。本文描述目标架构：**主循环调度 + 各模�
 | `car.c:470` `Car_ForwardVary` | 循环 `HAL_Delay(20)` | 参数 time |
 | `car.c:578` `Car_Brake` | `HAL_Delay(time)` | 参数 time |
 | `ir_avoid.c:95,102` `IrAvoid_Update` | 每次采样两段发射管稳定延时 | 2 × settle |
-| `ultrasonic.c:46,56` `Ultrasonic_ReadMm` | 忙等 ECHO 电平 | 量程上限对应回波时间 |
 | `line_tracker.c:89` `LineTracker_Run` | `while(1)` | 无限（调试入口，允许） |
 | `oled.c:49` `Oled_Update` | I2C 阻塞发送整屏 | 数 ms（诊断用，见 §9.1） |
-| `ultrasonic_avoid.c` | — | √ 已是 tick 判周期 |
-| `vision_task.c` 鸣笛/闪灯 | — | √ 已是相位状态机 |
+
 
 两个连带后果：
 
@@ -46,19 +44,6 @@ STM32F103 智能小车。本文描述目标架构：**主循环调度 + 各模�
   每次修正都要等编码器转够角度才返回。文档此前把它描述为"可被抢占"，与实现不符。
 - **`vision_task.c:224,229` 的转弯任务同理。** 注释已说明这是阻塞的，属于已知待改造项。
 
-### 2.2 共享资源无属主（阶段 3 已解决）
-
-蜂鸣器和 RGB 目前有四个写入方，互相覆盖且无优先级：
-
-| 模块 | 写入点 |
-| --- | --- |
-| `ir_avoid` | `IrAvoid_UpdateAlert()`，无障碍时无条件 `RGB_SetColor(0,0,0)` |
-| `ultrasonic_avoid` | `UltrasonicAvoid_Alert()` |
-| `vision_task` | `VisionTask_Alert()` / `VisionTask_Buzzer()` |
-| `main.c:108` | 按键 EXTI 回调直接写 GPIO |
-
-后果：入库闪灯期间若红外判无障碍，`IrAvoid_UpdateAlert(CLEAR)` 会把灯灭掉；
-按键中断也能随时改写。
 
 ### 2.3 编码器基准是全局的
 
@@ -67,18 +52,7 @@ STM32F103 智能小车。本文描述目标架构：**主循环调度 + 各模�
 而且任何想独立读里程的模块都会被清零。非阻塞化时必须改为**动作内部保存起始快照**，
 不再清零全局计数。
 
-### 2.4 已知逻辑缺陷
 
-- **`VISION_TASK_STOPPED` 出不去**（`vision_task.c:245`）。设计意图是"停在库里，
-  直到识别到新的视觉任务再判定状态"，但 `VisionTask_AcceptEvent()` 建任务的条件
-  全是 `task_state == IDLE`，落到 `STOPPED` 后所有任务类事件被静默丢弃，
-  `Handle()` 恒返回 1。**意图本身保留**，只需放开 `STOPPED` 也可接受新任务事件。
-- 事件槽只有一个（`vision_uart.c` 的 `vision_event` + `ready` 标志）。任务执行
-  期间到达的第二个事件会覆盖第一个，且无人知情。
-- 帧同步无超时重整。丢字节后若 id 或校验位恰为 `0xAA`，要等本帧走完才能重新对齐。
-- 红外遥控解出的 action 无人消费，见 §8.2。
-
----
 
 ## 3. 分层结构
 
@@ -339,9 +313,8 @@ void Indicator_Step(void);   /* 取最高优先级的有效申请，实际写 GP
 超声波同理：`ultrasonic` 只测距，`ultrasonic_avoid` 的动作逻辑并入 `avoid_task`，
 两种传感器发同一族 `EVENT_OBSTACLE_*` 事件，避障行为只写一份。
 
-`ultrasonic.c` 忙等 ECHO 那段（§2.1）最终应改成定时器输入捕获 + 中断，测距完成
-时回调。这是独立的一步，可以放到后面做；在它改完之前，忙等时长受量程上限约束，
-是本方案里唯一可接受的残留阻塞。
+`ultrasonic.c` 忙等 ECHO 那段（§2.1）已在阶段 6 消掉，但**没有按原计划用定时器
+输入捕获**——原因见 §10 的"阶段 6 落地情况"。
 
 **两路传感器冲突规则**：超声波只能报正前方，红外报左 / 右 / 双侧，语义不重叠。
 同时报障时**前方优先**——超声波报障就按前方障碍处理（后退再选向），否则按红外的
@@ -470,8 +443,8 @@ NEC 长按发的 repeat 帧**不计入**次数，否则按住 RED 会被误判�
 | ~~3~~ | **已完成** 指示层（§7） | 入库闪灯不再被红外清零 |
 | ~~4~~ | **已完成** 拆 `ir_avoid` 为传感器 + `avoid_task`（§8） | 避障动作期间仍能响应急停 |
 | ~~5~~ | **已完成（待实车标定）** 循迹改差速连续修正（§8.1） | 直线不摆动 → 缓弯不切内道 → 再提速 |
-| 6 | 超声波输入捕获（§8 末） | 消除最后一处忙等 |
-| 7 | 修 §2.4 缺陷；按 §8.2 接入遥控 | 1 号库后仍能接受新事件；连发事件不丢 |
+| ~~6~~ | **已完成（待实车验证）** 超声波非阻塞测距（§8 末，**改用 EXTI 而非输入捕获**） | 消除最后一处忙等 |
+| ~~7~~ | **已完成（待实车验证）** 修 §2.4 缺陷；遥控帧队列（§8.2） | 1 号库后仍能接受新事件；连发事件不丢 |
 
 阶段 1 是硬前提：`car` 不非阻塞化，上面的调度器都是空架子。
 
@@ -533,7 +506,7 @@ NEC 长按发的 repeat 帧**不计入**次数，否则按住 RED 会被误判�
 ### 阶段 5 落地情况
 
 循迹已接入调度器（`CONTROL_LINE_TRACK` → `LineTracker_Step()`），控制律改为
-混合策略。**参数尚未实车标定**，`LINE_DIFF_STEP` 是起点值不是结果。
+混合策略。**参数尚未完全实车标定**，`LINE_DIFF_STEP` 是起点值不是结果。
 
 图案 → 方向的映射**完全沿用原实现**，那套是实车验证过的。改的只是"偏差几档
 之后做什么"。
@@ -559,6 +532,75 @@ NEC 长按发的 repeat 帧**不计入**次数，否则按住 RED 会被误判�
 
 `Scheduler_SetMode()` 切回 `CONTROL_LINE_TRACK` 时调 `LineTracker_Reset()`，
 清掉原地转方向和丢线计数——被避障或手动打断后车身姿态已变，旧状态无意义。
+
+### 阶段 6 落地情况
+
+**没有用定时器输入捕获，改用 EXTI 双边沿 + DWT 时间戳。** 原因是硬件约束：
+**ECHO 接在 PF12，F103 没有任何定时器通道映射到 GPIOF**（`TIMx_CHy` 只落在
+GPIOA/B/C/D/E）。输入捕获要求引脚本身是定时器通道，走这条路必须先改接线。
+架构文档原先写"改成定时器输入捕获"时没有核对引脚，这里是对 §8 末的一处修正。
+
+EXTI 方案达到同样的目的——消掉忙等：
+
+- `Ultrasonic_Start()` 发完 TRIG 立即返回，不等 ECHO。
+- ECHO 的上升沿和下降沿各触发一次 EXTI，中断里只读 `DWT->CYCCNT` 打时间戳，
+  **不做除法、不 printf**。换算留给 `Ultrasonic_Step()`。
+- `Ultrasonic_Step()` 每轮查一次标志：回波到了就换算并返回 `DONE`，
+  `ULTRASONIC_TIMEOUT_MS`（35 ms）没到就返回 `TIMEOUT`。
+
+接口形态与 `car` 的动作状态机一致（Start / Step / GetStatus），终态由 Step
+返回一次后内部转 IDLE，所以 `GetStatus()` 是无副作用的纯查询。
+
+三个实现细节：
+
+- **ECHO 的 EXTI 配置写在 `Ultrasonic_Init()` 里，不改 `gpio.c`。** 后者是
+  CubeMX 生成的，重新生成会覆盖。EXTI12 当前没有别的引脚占用，直接重配 PF12
+  不会抢掉谁的中断源。
+- **`EXTI15_10_IRQHandler` 里补了一次 `HAL_GPIO_EXTI_IRQHandler(ECHO_Pin)`。**
+  ECHO(PF12) 与 IR_IN(PG11) 共用这个向量，不补的话 EXTI12 的挂起位没人清，
+  中断会反复进入。
+- **新增 `ULTRASONIC_MIN_GAP_MS`（60）**。HC-SR04 手册要求两次测距间隔 ≥60 ms，
+  否则上一次的余波会被当成这一次的回波。`Ultrasonic_Start()` 会拒绝过密的调用，
+  且 `ULTRASONIC_SENSE_PERIOD_MS ≥ MIN_GAP` 有 `_Static_assert` 拦截。原实现
+  没有这条约束，采样周期 100 ms 恰好满足，属于蒙对。
+
+残留阻塞只有 TRIG 那 10 µs 触发脉冲（DWT 忙等），是 HC-SR04 的时序要求，
+无法省掉。阻塞版 `Ultrasonic_ReadMm()` 保留为标定入口，内部实现为
+"Start + 循环 Step 直到终态"，与非阻塞路径共享同一份换算逻辑。
+
+### 阶段 7 落地情况
+
+三处，都是 §2.4 里点出的缺陷。
+
+**1. 视觉帧同步重整**（两道防线，`vision_uart.c`）：
+
+- **帧间静默超时**。一帧三个字节是连着发的（115200 下字节间隔约 87 µs），
+  距上一个字节超过 `VISION_FRAME_TIMEOUT_MS`（20 ms）就无条件从 step 0 重新
+  对齐。20 ms 远大于字节间隔、远小于视觉模块的帧周期。
+- **校验失败时按帧头重试**。校验位不对且该字节本身是 `0xAA` 时，把它当作下一帧
+  的帧头（step 1）而不是丢弃。这样只损失一帧就能重新对齐，不必等静默超时。
+
+新增 `VisionUart_GetResyncCount()`，`[DIAG]` 里的 `resync=` 持续增长说明视觉
+模块在丢字节或波特率有偏差。
+
+**2. `ir_remote` 单帧槽改环形队列**（深度 `IR_REMOTE_QUEUE_LEN` = 4）。中断只写
+head、主循环只写 tail，单生产者单消费者，入队出队都只是指针搬移，不需要临界区
+（原实现的 `IrRemote_Read()` 要 `__disable_irq()`）。
+
+两处顺带改对的地方：
+
+- **校验移到入队前**。坏帧不占队列位置——否则连按时坏帧会把好帧挤掉。原实现
+  把校验放在 `Read()` 里，坏帧会让那一次 `Read()` 直接失败。
+- **`ManualTask_Sense()` 改为把队列抽干**，不再每轮只取一帧。连按两次 RED 时
+  两帧可能都已在队列里，一轮只取一帧的话第二次 RED 要等下一轮，双击判定还是
+  会漏。双击窗口的过期判定挪到"本轮没收到任何帧"时才做。
+
+队列满时丢弃并计数（`IrRemote_GetDroppedCount()`），`[DIAG]` 里
+`REMOTE dropped=` 正常应为 0。
+
+**3. `VISION_TASK_STOPPED` 出不去**——这一条在阶段 2 就已经修掉了：
+`VisionTask_Begin()` 的 `acceptable` 同时接受 `IDLE` 和 `STOPPED`
+（`vision_task.c:111`）。§2.4 的描述已过期，本阶段只是确认。
 
 ---
 

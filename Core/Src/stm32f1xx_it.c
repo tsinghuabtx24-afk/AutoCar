@@ -274,7 +274,10 @@ void EXTI15_10_IRQHandler(void)
   /* USER CODE END EXTI15_10_IRQn 0 */
   HAL_GPIO_EXTI_IRQHandler(IR_IN_Pin);
   /* USER CODE BEGIN EXTI15_10_IRQn 1 */
-
+  /* 超声波 ECHO(PF12) 与 IR_IN(PG11) 共用 EXTI15_10 向量。ECHO 的 EXTI 由
+     Ultrasonic_Init() 配置（不改 CubeMX 生成的 gpio.c），这里必须补一次
+     清标志，否则 EXTI12 挂起位没人清，中断会反复进入。 */
+  HAL_GPIO_EXTI_IRQHandler(ECHO_Pin);
   /* USER CODE END EXTI15_10_IRQn 1 */
 }
 

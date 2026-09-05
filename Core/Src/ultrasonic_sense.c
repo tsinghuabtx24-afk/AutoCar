@@ -11,6 +11,12 @@
 
 #include <stdio.h>
 
+/* 采样周期必须留够 HC-SR04 的最小间隔，否则 Ultrasonic_Start() 会被反复拒绝，
+   实际采样率变成不可预期的值。改周期时这里会先报错，不用等上车发现。 */
+_Static_assert(ULTRASONIC_SENSE_PERIOD_MS >= ULTRASONIC_MIN_GAP_MS,
+               "ULTRASONIC_SENSE_PERIOD_MS must be >= ULTRASONIC_MIN_GAP_MS, "
+               "otherwise the previous burst is mistaken for this echo");
+
 static uint32_t us_last_tick;
 static uint8_t  us_blocked;
 static uint16_t us_last_mm;
@@ -28,38 +34,62 @@ void UltrasonicSense_Restart(void)
   us_blocked   = 0U;
 }
 
+/**
+  * @brief  推进超声波采样，只产生事件
+  * @note   全程非阻塞：到周期就发起一次测距，之后每轮推进状态机，回波到了
+  *         才判阈值。原实现调阻塞版 Ultrasonic_ReadMm()，空旷无回波时会卡
+  *         35ms，循迹的 10ms 控制周期被整整拖过三轮。
+  */
 void UltrasonicSense_Sense(void)
 {
   uint32_t now = HAL_GetTick();
   uint16_t distance_mm;
   uint8_t  blocked;
 
-  if ((uint32_t)(now - us_last_tick) < ULTRASONIC_SENSE_PERIOD_MS)
+  /* ---- 空闲：到周期就发起下一次测距 ---- */
+  if (Ultrasonic_GetStatus() == ULTRASONIC_IDLE)
   {
+    if ((uint32_t)(now - us_last_tick) < ULTRASONIC_SENSE_PERIOD_MS)
+    {
+      return;
+    }
+    /* Start 可能因 HC-SR04 的 60ms 最小间隔被拒，那就下一轮再试，
+       不推进 us_last_tick。 */
+    if (Ultrasonic_Start() != ULTRASONIC_BUSY)
+    {
+      return;
+    }
+    us_last_tick = now;
     return;
   }
-  us_last_tick = now;
 
-  if (Ultrasonic_ReadMm(&distance_mm) != HAL_OK)
+  /* ---- 测距进行中：推进一步 ---- */
+  switch (Ultrasonic_Step())
   {
-    /* 空旷时超出量程可能没有回波，按无障碍处理。 */
-    blocked = 0U;
-  }
-  else
-  {
-    us_last_mm = distance_mm;
+    case ULTRASONIC_BUSY:
+      return;   /* 回波还没到，本轮不判 */
 
-    /* 迟滞：已判障碍时要退到 threshold+hyst 之外才算解除。 */
-    if (us_blocked != 0U)
-    {
-      blocked = (uint8_t)(distance_mm <
-                          (ULTRASONIC_SENSE_THRESHOLD_MM +
-                           ULTRASONIC_SENSE_HYSTERESIS_MM));
-    }
-    else
-    {
-      blocked = (uint8_t)(distance_mm < ULTRASONIC_SENSE_THRESHOLD_MM);
-    }
+    case ULTRASONIC_DONE:
+      distance_mm = Ultrasonic_GetLastMm();
+      us_last_mm  = distance_mm;
+
+      /* 迟滞：已判障碍时要退到 threshold+hyst 之外才算解除。 */
+      if (us_blocked != 0U)
+      {
+        blocked = (uint8_t)(distance_mm <
+                            (ULTRASONIC_SENSE_THRESHOLD_MM +
+                             ULTRASONIC_SENSE_HYSTERESIS_MM));
+      }
+      else
+      {
+        blocked = (uint8_t)(distance_mm < ULTRASONIC_SENSE_THRESHOLD_MM);
+      }
+      break;
+
+    default:
+      /* 超时/超量程：空旷时没有回波，按无障碍处理。 */
+      blocked = 0U;
+      break;
   }
 
   if (blocked != us_blocked)

@@ -9,9 +9,9 @@
   *          **前方优先**：有前方障碍就按前方处理（后退再选向），否则按红外
   *          的左右状态处理。
   *
-  *          Ultrasonic_ReadMm() 内部仍忙等 ECHO 电平，受 ULTRASONIC_TIMEOUT_MS
-  *          约束（35ms）。这是本架构里唯一可接受的残留阻塞，彻底解决要改成
-  *          定时器输入捕获，见改造阶段 6。
+  *          测距已改为非阻塞（阶段 6）：Ultrasonic_Start() 发 TRIG 后立即返回，
+  *          ECHO 双边沿在中断里打时间戳，本模块每轮 Ultrasonic_Step() 推进。
+  *          空旷无回波时不再卡 35ms，循迹的 10ms 控制周期不受影响。
   ******************************************************************************
   */
 #ifndef __ULTRASONIC_SENSE_H__
@@ -29,7 +29,8 @@ extern "C" {
 /* 迟滞：解除判定要比触发判定远这么多，避免边界抖动。 */
 #define ULTRASONIC_SENSE_HYSTERESIS_MM  50U
 
-/* 测距周期。比红外的 20ms 慢，因为单次测距本身可能耗时数十毫秒。 */
+/* 测距周期。测距本身已不阻塞主循环，但仍要 ≥ ULTRASONIC_MIN_GAP_MS(60)，
+   否则上一次的余波会被当成这一次的回波。 */
 #define ULTRASONIC_SENSE_PERIOD_MS      100U
 
 void UltrasonicSense_Init(void);

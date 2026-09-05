@@ -114,6 +114,8 @@ void RGB_SetColor(uint8_t r, uint8_t g, uint8_t b)
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   IrRemote_EXTI_Callback(GPIO_Pin);
+  /* 超声波 ECHO 双边沿：中断里只打 DWT 时间戳，换算留给 Ultrasonic_Step()。 */
+  Ultrasonic_EXTI_Callback(GPIO_Pin);
 
   if (GPIO_Pin == key1_Pin || GPIO_Pin == key3_Pin)
   {
@@ -284,8 +286,8 @@ int main(void)
           遥控必须每轮采样——RED 双击是进入手动模式的唯一入口。
           视觉帧由 UART2 中断直接投递事件，这里无需轮询。 */
     ManualTask_Sense();
-    // IrAvoid_Sense();
-    // UltrasonicSense_Sense();
+    IrAvoid_Sense();
+    UltrasonicSense_Sense();
 
     /* 2. 调度层：消费事件，决定控制模式。 */
     Scheduler_DrainEvents();
@@ -304,8 +306,9 @@ int main(void)
       {
         last_vision_debug_tick = now;
         printf("[DIAG] mode=%s speed=%u ir=%s front=%umm | RX count=%lu "
-               "last=0x%02X errors=%lu code=0x%08lX | EVT posted=%lu "
-               "dropped=%lu\r\n",
+               "last=0x%02X errors=%lu resync=%lu code=0x%08lX | "
+               "REMOTE dropped=%lu | EVT posted=%lu dropped=%lu | "
+               "AVOID %s step=%u\r\n",
                Scheduler_ModeName(Scheduler_GetMode()),
                (unsigned)VisionTask_GetSpeed(),
                IrAvoid_StateName(IrAvoid_GetState()),
@@ -313,9 +316,13 @@ int main(void)
                (unsigned long)VisionUart_GetRxCount(),
                (unsigned)VisionUart_GetLastByte(),
                (unsigned long)VisionUart_GetErrorCount(),
+               (unsigned long)VisionUart_GetResyncCount(),
                (unsigned long)VisionUart_GetLastError(),
+               (unsigned long)IrRemote_GetDroppedCount(),
                (unsigned long)Event_GetPostedCount(),
-               (unsigned long)Event_GetDroppedCount());
+               (unsigned long)Event_GetDroppedCount(),
+               AvoidTask_StateName(AvoidTask_GetState()),
+               (unsigned)AvoidTask_GetStep());
       }
     }
 

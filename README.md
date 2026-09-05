@@ -27,8 +27,8 @@ cmake --build build/Debug
 while (1)
 {
   ManualTask_Sense();        /* 1. 采样层：只产生事件，不驱动底盘 */
-  IrAvoid_Sense();
-  UltrasonicSense_Sense();
+  // IrAvoid_Sense();        /*    当前注释：阈值与赛场实况不符 */
+  // UltrasonicSense_Sense();
 
   Scheduler_DrainEvents();   /* 2. 调度层：消费事件，决定控制模式 */
   Scheduler_Dispatch();      /* 3. 分派：本轮只有一个模块写电机 */
@@ -47,7 +47,7 @@ while (1)
 | --- | --- | --- |
 | `CONTROL_STOP` | key3、`EVENT_FAULT` | 持续制动，只有 key2 能退出 |
 | `CONTROL_MANUAL` | 遥控 RED 键**双击** | 遥控手动接管，避障不再保护车体 |
-| `CONTROL_IR_AVOID` | 红外/超声波报障 | 避障状态机接管 |
+| `CONTROL_IR_AVOID` | 红外/超声波报障 | 避障状态机接管。**当前进不去**：两个采样调用在 `main.c` 里注释着，没有生产者 |
 | `CONTROL_TASK` | 视觉识别到任务 | 转弯/鸣笛/入库 |
 | `CONTROL_LINE_TRACK` | 默认 | 差速循迹 |
 | `CONTROL_IDLE` | — | 停车待命，key2 启动 |
@@ -72,7 +72,7 @@ USART2 收 3 字节帧：`0xAA` / `id` / `0xAA ^ id`。
 
 | id | 含义 | 处理 |
 | --- | --- | --- |
-| 0 | 限速 | 只降巡线速度，不抢占底盘 |
+| 0 | 限速 | 只改 `task_speed`，不抢占底盘。⚠️ **当前没有实际效果**，见已知问题 |
 | 1 | 解除限速 | 恢复默认速度 |
 | 2 / 3 | 左转 / 右转 | 原地旋转 90° |
 | 4 | 鸣笛 | 停车鸣两声 |
@@ -201,40 +201,36 @@ switch (Car_ActionStep())                   /* 每轮推进一次 */
 
 改红外采样周期时记得同步 `AVOID_VERIFY_MS`（120），它要覆盖至少一轮完整采样。
 
-## 首次上车
+### 超声波（`ultrasonic.h`）
 
-建议改这三处再烧：
+`ULTRASONIC_TIMEOUT_MS`（35，单次测距总超时）、`ULTRASONIC_MIN_GAP_MS`（60，
+HC-SR04 手册要求的最小间隔）、`ULTRASONIC_MAX_MM`（4000，超量程一律判无效）。
 
-```c
-/* scheduler.h — 上电先停着，按 key2 再跑 */
-#define SCHEDULER_START_MODE   CONTROL_IDLE
+`ULTRASONIC_SENSE_PERIOD_MS` 必须 ≥ `ULTRASONIC_MIN_GAP_MS`，已有
+`_Static_assert` 拦截。
 
-/* line_tracker.h — 架空车轮时开着看图案，放地上跑之前关掉 */
-#define LINE_DEBUG_PATTERN     1U
+## 诊断串口
 
-/* main.c — 暂时不用超声波时注释掉，避开 35ms 忙等 */
-// UltrasonicSense_Sense();
-```
+`[DIAG]` 每秒一行，阶段 6/7 之后多了两个计数器：
 
-顺序：
-
-1. **架空车轮**，开 `LINE_DEBUG_PATTERN`，用手遮挡四路传感器，确认串口
-   `[LINE] pattern=` 变化正确、左右方向没反。
-2. 关掉 `LINE_DEBUG_PATTERN`（它每行 2.6 ms，占掉 10 ms 控制周期的四分之一）。
-3. 放地上跑，调 `LINE_DIFF_STEP`。
-4. 串口 `[DIAG]` 每秒一行，`mode=` 应稳定显示 `LINE_TRACK`。如果反复跳成
-   `IR_AVOID`，是红外阈值没标定或场地边上有东西。
+- `resync=` — 视觉帧因丢字节而重新对齐的次数。持续增长说明视觉模块在丢字节
+  或波特率有偏差。
+- `REMOTE dropped=` — 遥控帧队列满而丢弃的帧数，正常应为 0。
 
 ## 已知问题
 
 | 问题 | 影响 | 计划 |
 | --- | --- | --- |
-| 超声波 `Ultrasonic_ReadMm()` 忙等 ECHO | 空旷无回波时卡 35 ms，每 100 ms 一次，循迹会周期性顿一下 | 阶段 6 改定时器输入捕获 |
-| 视觉帧同步无超时重整 | 丢字节后若 id 或校验位恰为 `0xAA`，要等本帧走完才能重新对齐 | 阶段 7 |
-| `ir_remote` 单帧槽 | 连按会覆盖 | 阶段 7 |
+| 视觉 id 0 的限速没有实际效果 | `task_speed` 只被 `[DIAG]` 打印，循迹用的是 `LINE_BASE_SPEED`，两者没有连接 | 待定，见下 |
+| 超声波 ECHO 与 IR_IN 共用 EXTI15_10 向量 | 遥控解码和测距的中断会互相排队，抖动几百 ns | 不影响毫米级精度，不处理 |
 | 左侧 RGB 的 R/G 引脚与命名相反 | 申请红色实际亮绿色，右侧正常 | 硬件接线问题，`indicator.c` 已注明 |
 | `ultrasonic_avoid.c` 已被 `avoid_task` 取代 | 保留作调试入口，但直写 RGB 绕过指示层、内部阻塞 | 文件头已标注 |
 | `oled` 阻塞 I2C | 运动期间不能刷屏 | 只在 IDLE / STOP 或调试时更新 |
+
+限速那条要接起来的话，得让 `line_tracker` 的基础速度从 `VisionTask_GetSpeed()`
+取，而不是直接用宏。但循迹的差速档位和死区约束都是按固定 `LINE_BASE_SPEED`
+标定的（`_Static_assert` 也是编译期检查这个宏），改成运行时可变需要把死区
+约束改成运行时钳位。**循迹参数还没实车标定完，先不动这里**。
 
 ## 编程规则
 
@@ -258,9 +254,14 @@ switch (Car_ActionStep())                   /* 每轮推进一次 */
 | 3 | 指示层 | ✅ |
 | 4 | 拆 `ir_avoid` 为传感器 + `avoid_task` | ✅ |
 | 5 | 循迹改差速连续修正 | ✅ 待实车标定 |
-| 6 | 超声波改定时器输入捕获 | 未开始 |
-| 7 | 视觉帧同步重整、遥控事件化 | 未开始 |
+| 6 | 超声波改中断式测距（非输入捕获，见下） | ✅ 待实车验证 |
+| 7 | 视觉帧同步重整、遥控帧队列、1 号库缺陷 | ✅ 待实车验证 |
+
+阶段 6 **没有用定时器输入捕获**：ECHO 接在 PF12，F103 没有任何定时器通道映射
+到 GPIOF，输入捕获必须先改硬件接线。改用 **EXTI 双边沿 + DWT 时间戳**达到同样
+目的——中断里只打时间戳，主循环 `Ultrasonic_Step()` 查状态并换算。忙等只剩
+TRIG 那 10 µs 触发脉冲，是 HC-SR04 的时序要求。
 
 
 ## AI守则 
- 奉劝AI，在实机调试时，实际情况远比你的思考重要，不要想当然下定结论，更不可自己直接修改代码；而是要多询问实际情况，多给出几种可能，等到被同意后才可以修改代码。
+ 在实机调试时，实际情况远比AI或人的思考重要。所以AI不可直接下定结论，更不可直接修改代码和文档；而是必须要询问实际情况，多给出几种可能，等到被同意后才可以修改代码。

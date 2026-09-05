@@ -72,46 +72,53 @@ static void ManualTask_HandleRed(uint32_t now)
   manual_last_red_tick = now;
 }
 
+/**
+  * @brief  采样遥控，把按键翻译成事件
+  * @note   ir_remote 改成帧队列后这里要**把队列抽干**，不能每轮只取一帧：
+  *         连按两次 RED 时两帧可能都已在队列里，一轮只取一帧的话第二次 RED
+  *         要等到下一轮才处理，双击判定还是会漏。
+  */
 void ManualTask_Sense(void)
 {
   IrRemote_Frame frame;
   uint32_t       now = HAL_GetTick();
+  uint8_t        got_any = 0U;
 
   /* repeat 帧只用于刷新"按键仍按住"，不参与双击计数。 */
   if (IrRemote_IsRepeat() != 0U)
   {
     manual_last_key_tick = now;
-    return;
   }
 
-  if (IrRemote_Read(&frame) == 0U)
+  while (IrRemote_Read(&frame) != 0U)
   {
-    /* 双击窗口过期就解除待判，避免两次相隔很久的 RED 被凑成一次双击。 */
-    if ((manual_red_armed != 0U) &&
-        ((uint32_t)(now - manual_last_red_tick) > MANUAL_DOUBLE_MS))
+    got_any = 1U;
+    manual_last_key_tick = now;
+
+    if (frame.command == MANUAL_KEY_RED)
     {
-      manual_red_armed = 0U;
+      ManualTask_HandleRed(now);
+      continue;
     }
-    return;
-  }
 
-  manual_last_key_tick = now;
-
-  if (frame.command == MANUAL_KEY_RED)
-  {
-    ManualTask_HandleRed(now);
-    return;
-  }
-
-  /* 其他键投递为动作事件。是否采纳由调度器按当前模式决定：非手动模式下
-     这些事件会被丢弃，遥控不介入自动驾驶。 */
-  {
-    Event_Type type = ManualTask_CommandToEvent(frame.command);
-
-    if (type != EVENT_NONE)
+    /* 其他键投递为动作事件。是否采纳由调度器按当前模式决定：非手动模式下
+       这些事件会被丢弃，遥控不介入自动驾驶。 */
     {
-      (void)Event_Post(type, frame.command);
+      Event_Type type = ManualTask_CommandToEvent(frame.command);
+
+      if (type != EVENT_NONE)
+      {
+        (void)Event_Post(type, frame.command);
+      }
     }
+  }
+
+  /* 双击窗口过期就解除待判，避免两次相隔很久的 RED 被凑成一次双击。
+     本轮收到过帧就不判——第一次 RED 刚刚才记上时间。 */
+  if ((got_any == 0U) && (manual_red_armed != 0U) &&
+      ((uint32_t)(now - manual_last_red_tick) > MANUAL_DOUBLE_MS))
+  {
+    manual_red_armed = 0U;
   }
 }
 
