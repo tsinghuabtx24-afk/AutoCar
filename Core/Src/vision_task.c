@@ -1,8 +1,21 @@
 #include "vision_task.h"
 #include "car.h"
 #include "indicator.h"
+#include "line_tracker.h"
 
 #include <stdio.h>
+
+/* 限速后的速度必须仍高于死区，否则限速等于停车。 */
+_Static_assert(VISION_SPEED_NORMAL > VISION_SPEED_LIMIT_DROP,
+               "VISION_SPEED_LIMIT_DROP exceeds VISION_SPEED_NORMAL");
+_Static_assert((VISION_SPEED_NORMAL - VISION_SPEED_LIMIT_DROP) >
+               (CAR_SPEED_BASE + 2U),
+               "limited speed falls into the motor dead zone");
+
+/* 解除限速要恢复到循迹的默认速度，两个宏必须一致，否则一次限速+解除之后
+   车速会悄悄变成另一个值。 */
+_Static_assert(VISION_SPEED_NORMAL == LINE_BASE_SPEED,
+               "VISION_SPEED_NORMAL must match LINE_BASE_SPEED");
 
 static VisionTask_State task_state;
 static uint32_t task_start_tick;
@@ -114,15 +127,10 @@ uint8_t VisionTask_Begin(Event_Type type)
   switch (type)
   {
     case EVENT_VISION_SPEED_LIMIT:
-      /* 限速：在正常速度基础上降低固定占空比，并保护下限。 */
-      if (VISION_SPEED_NORMAL > VISION_SPEED_LIMIT_DROP)
-      {
-        task_speed = (uint8_t)(VISION_SPEED_NORMAL - VISION_SPEED_LIMIT_DROP);
-      }
-      else
-      {
-        task_speed = 0U;
-      }
+      /* 限速：在正常速度基础上降低固定占空比。
+         下限保护交给 LineTracker_SetBaseSpeed()——那里才知道死区和差速需要
+         多少余量，在这里判 0 反而会算出一个电机根本不转的值。 */
+      task_speed = (uint8_t)(VISION_SPEED_NORMAL - VISION_SPEED_LIMIT_DROP);
       printf("[VTASK] speed limited to %u\r\n", (unsigned)task_speed);
       return 0U;
 

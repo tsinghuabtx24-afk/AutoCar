@@ -8,24 +8,31 @@
 #include "line_tracker.h"
 #include "car.h"
 #include "event.h"
+#include "encoder.h"
 #include "retarget.h"
+#include "vision_nav.h"
 
 #include <stdio.h>
 
-/* 死区约束编译期检查：最大档差速减下来必须仍在死区之上，否则内侧轮会
-   直接停转，变成急转而不是修正。改速度参数时这里会先报错，不用等上车发现。 */
+/* 死区约束：最大档差速减下来必须仍在死区之上，否则内侧轮会直接停转，变成
+   急转而不是修正。
+
+   基础速度现在是运行时可变的（视觉限速要生效），所以这条约束改为运行时钳位，
+   见 LineTracker_EffDiff()。这里的编译期检查只针对**默认值**，确保默认配置
+   本身是合理的。 */
 _Static_assert((LINE_BASE_SPEED - 2U * LINE_DIFF_STEP) > CAR_SPEED_BASE,
-               "LINE_BASE_SPEED too low for LINE_DIFF_STEP: inner wheel "
-               "would fall into the motor dead zone");
+               "default LINE_BASE_SPEED too low for LINE_DIFF_STEP: inner "
+               "wheel would fall into the motor dead zone");
 _Static_assert((LINE_BASE_SPEED + 2U * LINE_DIFF_STEP) <= MOTOR_SPEED_MAX,
                "LINE_BASE_SPEED + max diff exceeds MOTOR_SPEED_MAX");
 
 /* 循迹内部状态。原地转是一个持续若干周期的相位，需要记住方向。 */
 typedef enum
 {
-  LINE_MODE_DIFF = 0,   /* 差速连续修正 */
-  LINE_MODE_PIVOT,      /* 大偏差原地转，边转边看传感器 */
-  LINE_MODE_LOST        /* 判定丢线，已制动 */
+  LINE_MODE_DIFF = 0,       /* 差速连续修正 */
+  LINE_MODE_PIVOT,          /* 大偏差原地转，边转边看传感器 */
+  LINE_MODE_VISION_TURN,    /* 视觉导航的定角旋转（vision_nav 发起） */
+  LINE_MODE_LOST            /* 判定丢线，已制动 */
 } LineTracker_Mode;
 
 static uint8_t  line_last_pattern = 0xFFU;
@@ -34,6 +41,10 @@ static LineTracker_Mode line_mode;
 static int8_t   line_pivot_dir;      /* +1 向左转，-1 向右转 */
 static uint32_t line_pivot_tick;
 static uint16_t line_lost_count;
+/* 基础速度。默认为 LINE_BASE_SPEED，视觉限速/恢复时由调度器改写。 */
+static uint8_t  line_base_speed = LINE_BASE_SPEED;
+/* 视觉旋转的起始编码器角度快照，用于打印实测转角供标定。 */
+static int32_t  line_turn_start_deg10;
 
 uint8_t LineTracker_ReadPattern(void)
 {
@@ -51,13 +62,64 @@ uint8_t LineTracker_ReadPattern(void)
   return pattern;
 }
 
+/**
+  * @brief  按当前基础速度算出可用的一档差速
+  * @note   死区运行时钳位：base - 2×diff 必须 > CAR_SPEED_BASE。
+  *         速度 70 → 6（与改动前一致）；限速到 60 → 4。
+  */
+static uint8_t LineTracker_EffDiff(void)
+{
+  uint8_t room;
+
+  if (line_base_speed <= (uint8_t)(CAR_SPEED_BASE + 1U))
+  {
+    return 0U;   /* 没有差速空间，只能直行 */
+  }
+  room = (uint8_t)((line_base_speed - CAR_SPEED_BASE - 1U) / 2U);
+
+  return (room < LINE_DIFF_STEP) ? room : (uint8_t)LINE_DIFF_STEP;
+}
+
+void LineTracker_SetBaseSpeed(uint8_t speed)
+{
+  /* 下限：至少要留出一档差速的空间，否则限速等于让车走不动。 */
+  uint8_t lo = (uint8_t)(CAR_SPEED_BASE + 3U);
+  uint8_t s  = (speed < lo) ? lo : speed;
+
+  if (s > MOTOR_SPEED_MAX)
+  {
+    s = MOTOR_SPEED_MAX;
+  }
+  if (s == line_base_speed)
+  {
+    return;
+  }
+  line_base_speed = s;
+  printf("[LINE] base speed = %u (diff step %u)\r\n",
+         (unsigned)line_base_speed, (unsigned)LineTracker_EffDiff());
+}
+
+uint8_t LineTracker_GetBaseSpeed(void) { return line_base_speed; }
+
 void LineTracker_Reset(void)
 {
+  /* 若在视觉旋转途中被抢占（避障/手动接管都会 Car_ActionAbort()），必须告知
+     vision_nav 放弃本次机动。否则它永远停在 TURN_*_RUN 等一个再也不会来的
+     OnTurnDone()，视觉门此后再也不会打开。
+     选择放弃整个机动而不是"接着转"：被抢占后车身姿态已变，第二段反向转会
+     把车带偏——与急停时的处理一致。 */
+  if (line_mode == LINE_MODE_VISION_TURN)
+  {
+    VisionNav_Reset();
+  }
+
   line_mode        = LINE_MODE_DIFF;
   line_pivot_dir   = 0;
   line_lost_count  = 0U;
   line_last_pattern = 0xFFU;
   line_last_tick   = 0U;   /* 立刻允许下一次控制计算 */
+  /* 基础速度**不重置**：限速是持续配置，被避障打断后应该保持，
+     由视觉的"解除限速"事件恢复。 */
 }
 
 void LineTracker_Init(void)
@@ -108,9 +170,10 @@ static uint8_t LineTracker_Decode(uint8_t pattern, int8_t *level)
   */
 static void LineTracker_DriveDiff(int8_t level)
 {
-  int16_t diff = (int16_t)((int16_t)level * (int16_t)LINE_DIFF_STEP);
-  int16_t left  = (int16_t)((int16_t)LINE_BASE_SPEED - diff);
-  int16_t right = (int16_t)((int16_t)LINE_BASE_SPEED + diff);
+  int16_t step  = (int16_t)LineTracker_EffDiff();
+  int16_t diff  = (int16_t)((int16_t)level * step);
+  int16_t left  = (int16_t)((int16_t)line_base_speed - diff);
+  int16_t right = (int16_t)((int16_t)line_base_speed + diff);
 
   Car_DriveSpeed(left, right);
 }
@@ -188,6 +251,66 @@ void LineTracker_Step(void)
   }
 
   known = LineTracker_Decode(pattern, &level);
+
+  /* 把图案告知视觉导航（只读，不影响下面的循迹判断）。全黑在 ARMED 状态下
+     会开启视觉；0000/0001/1000 在 WAIT 状态下会构成旋转触发。 */
+  VisionNav_OnPattern(pattern);
+  VisionNav_Step();
+
+  /* ---- 视觉旋转进行中：推进定角动作，转完交回差速 ---- */
+  if (line_mode == LINE_MODE_VISION_TURN)
+  {
+    Car_ActionStatus st = Car_ActionStep();
+
+    if (st == CAR_ACTION_BUSY)
+    {
+      return;
+    }
+
+    /* DONE / TIMEOUT / FAILED 都算这次旋转结束（car 已制动）。把实测转角
+       报给 vision_nav 打印，供标定 VNAV_TURN_DEG10。 */
+    VisionNav_OnTurnDone(Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM) -
+                         line_turn_start_deg10);
+    if (st != CAR_ACTION_DONE)
+    {
+      printf("[LINE] vision turn ended abnormally (%d)\r\n", (int)st);
+    }
+    line_mode = LINE_MODE_DIFF;
+    return;
+  }
+
+  /* ---- 视觉导航要求旋转：让位给定角动作 ----
+     放在丢线判定之前：旋转触发图案里包含全黑，而全黑不参与丢线计数，
+     两者不冲突。 */
+  {
+    int32_t turn_deg10 = 0;
+
+    if ((line_mode != LINE_MODE_LOST) &&
+        (VisionNav_TakeTurnRequest(&turn_deg10) != 0U))
+    {
+      Car_ActionAbort();   /* 循迹用的是瞬时接口，这里确保没有残留动作 */
+      if (Car_StartRotateAngle(VNAV_TURN_SPEED, turn_deg10) == CAR_ACTION_BUSY)
+      {
+        line_turn_start_deg10 = Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM);
+        line_mode = LINE_MODE_VISION_TURN;
+        return;
+      }
+      /* 发起失败：告知 vision_nav 结束这一相，避免它卡在 RUN 状态。 */
+      printf("[LINE] vision turn rejected\r\n");
+      VisionNav_OnTurnDone(0);
+    }
+  }
+
+  /* ---- 全黑：不停车、不判丢线，维持上一周期轮速 ----
+     Vision 赛道把全黑当作路口信号而不是异常。停在路口上视觉即使识别到了
+     也没法继续走，所以这里保持原有状态继续前进。
+     注意：这一段必须在"未定义图案 → 停车"之前，因为 0x00 在 Decode 里
+     同样落 default。 */
+  if (pattern == LINE_PATTERN_ALL_BLACK)
+  {
+    line_lost_count = 0U;
+    return;
+  }
 
   /* ---- 丢线持续判定：全白且持续足够多个周期 ---- */
   if (pattern == 0x0FU)

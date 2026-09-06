@@ -64,6 +64,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/indicator.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/avoid_task.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/ultrasonic_sense.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/vision_nav.c
 )
 
 # Add include paths
