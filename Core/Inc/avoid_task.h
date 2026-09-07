@@ -49,9 +49,9 @@ extern "C" {
    ============================================================================ */
 
 /* 每一步的旋转角与前进距离。角度用 _DEG10（600 = 60.0°）。 */
-#define AVOID_DETOUR_TURN_DEG10   600U
-#define AVOID_DETOUR_LONG_MM      200U
-#define AVOID_DETOUR_CROSS_MM     200U
+#define AVOID_DETOUR_TURN_DEG10   900U
+#define AVOID_DETOUR_LONG_MM      300U
+#define AVOID_DETOUR_CROSS_MM     500U
 
 /* 绕行用的速度。旋转速度必须 ≥ CAR_ANGLE_MIN_SPEED(55)，否则 car 拒绝动作
    （滑移补偿表在低速下不适用）。 */

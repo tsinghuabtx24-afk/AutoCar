@@ -148,39 +148,72 @@ static int16_t Car_EffToDuty(int16_t eff)
   return (eff >= 0) ? mag : (int16_t)(-mag);
 }
 
-/**
-  * @brief  获取角度动作的编码器目标放大系数
-  * @retval 千分比系数，1000 表示不补偿
-  */
-static uint16_t Car_AngleCompX1000(uint8_t speed, uint16_t radius_mm,
-                                   int8_t direction)
-{
 #if CAR_ANGLE_COMP_ENABLE
-  if (radius_mm != 0U)
-  {
-    return (direction > 0) ? CAR_TURN_LEFT_COMP_X1000
-                           : CAR_TURN_RIGHT_COMP_X1000;
-  }
-
+/**
+  * @brief  原地旋转的基准补偿系数，仅按 PWM 插值，不含方向修正
+  * @retval 千分比系数
+  */
+static uint16_t Car_RotCompBaseX1000(uint8_t speed)
+{
   if (speed <= 70U)
   {
     return CAR_ROT_COMP_70_X1000;
   }
   if (speed <= 80U)
   {
-        return (uint16_t)((int32_t)CAR_ROT_COMP_70_X1000
+    return (uint16_t)((int32_t)CAR_ROT_COMP_70_X1000
                       + ((int32_t)CAR_ROT_COMP_80_X1000
                          - (int32_t)CAR_ROT_COMP_70_X1000)
                         * (int32_t)(speed - 70U) / 10L);
   }
   if (speed < 100U)
   {
-        return (uint16_t)((int32_t)CAR_ROT_COMP_80_X1000
+    return (uint16_t)((int32_t)CAR_ROT_COMP_80_X1000
                       + ((int32_t)CAR_ROT_COMP_100_X1000
                          - (int32_t)CAR_ROT_COMP_80_X1000)
                         * (int32_t)(speed - 80U) / 20L);
   }
   return CAR_ROT_COMP_100_X1000;
+}
+#endif
+
+/**
+  * @brief  获取角度动作的编码器目标放大系数
+  * @retval 千分比系数，1000 表示不补偿
+  *
+  * @note   原地旋转在按 PWM 插值之后再乘一个方向系数，左右各自独立标定，
+  *         见 car.h 的 CAR_ROT_*_SCALE_X1000。半径转弯本来就是两个独立
+  *         系数，不再叠加。
+  */
+static uint16_t Car_AngleCompX1000(uint8_t speed, uint16_t radius_mm,
+                                   int8_t direction)
+{
+#if CAR_ANGLE_COMP_ENABLE
+  uint32_t comp;
+  uint32_t scale;
+
+  if (radius_mm != 0U)
+  {
+    return (direction > 0) ? CAR_TURN_LEFT_COMP_X1000
+                           : CAR_TURN_RIGHT_COMP_X1000;
+  }
+
+  comp  = (uint32_t)Car_RotCompBaseX1000(speed);
+  scale = (direction > 0) ? (uint32_t)CAR_ROT_LEFT_SCALE_X1000
+                          : (uint32_t)CAR_ROT_RIGHT_SCALE_X1000;
+  comp  = (comp * scale + 500U) / 1000U;
+
+  /* 钳到 uint16_t：这个值还要乘上目标角度，溢出会让编码器目标变成一个
+     永远到不了的数，动作只能等超时。 */
+  if (comp > 65535U)
+  {
+    comp = 65535U;
+  }
+  if (comp == 0U)
+  {
+    comp = 1U;   /* 系数为 0 会让动作立刻完成，等于没转 */
+  }
+  return (uint16_t)comp;
 #else
   (void)speed;
   (void)radius_mm;

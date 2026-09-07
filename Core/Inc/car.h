@@ -104,14 +104,34 @@ extern "C" {
 #define CAR_ANGLE_COMP_ENABLE       1U
 #define CAR_ANGLE_MIN_SPEED         55U
 
-/* 原地旋转实测标定点：指令 90° 时，70/80/100 分别约转 40°/41°/45°。 */
+/* 原地旋转实测标定点：指令 90° 时，70/80/100 分别约转 40°/41°/45°。
+   这张表只有 PWM 一个自变量，左右转共用。 */
 #define CAR_ROT_COMP_70_X1000       2250U
 #define CAR_ROT_COMP_80_X1000       2195U
 #define CAR_ROT_COMP_100_X1000      2000U
 
+/* ==== 原地旋转的左右方向系数 ===
+   上面那张表按 PWM 插值，左右转拿到完全相同的系数。但实车原地旋转左右并不
+   对称——电机特性、轮胎抓地、重心偏置都会造成差异，而这个差异在代码里原先
+   无处表达：轮速是对称的（等速反向只换边），编码器算角度用的是有符号差
+   right-left，本身不偏向任何一侧。
+
+   这两个宏是**乘在表输出之上**的方向修正，各自独立，改一个不影响另一个。
+
+   标定方法：指令 90°（Car_RotateLeftAngle/RightAngle 传 900），量车体实际
+   转角 A，然后
+
+       新值 = 当前值 × 90 / A
+
+   转得不够（A < 90）系数变大，转过头（A > 90）系数变小。串口会打印
+   [ANGLE] start dir=... comp=x.xxx，那是表值与本系数相乘后的结果，可以
+   直接核对。 */
+#define CAR_ROT_LEFT_SCALE_X1000    1050U
+#define CAR_ROT_RIGHT_SCALE_X1000   1250U   /* ⚠️ 待实测，见上面标定方法 */
+
 /* 半径转弯仅有 100 PWM 标定数据：左转约 45°，右转约 30°。 */
-#define CAR_TURN_LEFT_COMP_X1000    2200U
-#define CAR_TURN_RIGHT_COMP_X1000   3000U
+#define CAR_TURN_LEFT_COMP_X1000    2100U
+#define CAR_TURN_RIGHT_COMP_X1000   4200U
 
 /* ==== 非阻塞动作状态机 ======================================================
    长动作（按里程、按角度、变速斜坡、定时保持）统一走"发起 + 每轮推进"两步：

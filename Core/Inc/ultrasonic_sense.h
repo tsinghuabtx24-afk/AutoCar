@@ -24,7 +24,7 @@ extern "C" {
 #include "main.h"
 
 /* 前方障碍判定距离。 */
-#define ULTRASONIC_SENSE_THRESHOLD_MM   200U
+#define ULTRASONIC_SENSE_THRESHOLD_MM   300U
 
 /* 迟滞：解除判定要比触发判定远这么多，避免边界抖动。 */
 #define ULTRASONIC_SENSE_HYSTERESIS_MM  50U
