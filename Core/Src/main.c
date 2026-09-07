@@ -286,7 +286,7 @@ int main(void)
           遥控必须每轮采样——RED 双击是进入手动模式的唯一入口。
           视觉帧由 UART2 中断直接投递事件，这里无需轮询。 */
     ManualTask_Sense();
-    IrAvoid_Sense();
+    // IrAvoid_Sense();
     UltrasonicSense_Sense();
 
     /* 2. 调度层：消费事件，决定控制模式。 */
@@ -328,8 +328,8 @@ int main(void)
 
 
     /* 按编码器距离运动示例（需要测试时取消对应注释） */
-    // Car_ForwardDistance(70U, 1000U);    /* 前进 200mm 后制动 */
-    // HAL_Delay(10000U);
+    // Car_ForwardDistance(100U, 160U);    /* 前进 2000mm 后制动 */
+    // HAL_Delay(4000U);
     // Car_BackwardDistance(70U, 1000U);   /* 后退 200mm 后制动 */
     // HAL_Delay(10000U);
     // HAL_Delay(3000U);

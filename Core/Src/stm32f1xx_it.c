@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "encoder.h"
+#include "speed_ctrl.h"
 #include "usart.h"
 /* USER CODE END Includes */
 
@@ -197,6 +198,19 @@ void SysTick_Handler(void)
      必须在 HAL_IncTick() 之后：Encoder_Update() 内部用 HAL_GetTick()
      算转速的时间基准。 */
   Encoder_Update();
+
+  /* 转速闭环。必须在 Encoder_Update() 之后：PI 用的实测转速就是它算出来的。
+     内部按 SPEEDCTRL_PERIOD_MS(20ms) 限流，所以这里每 1ms 调也只有 1/20
+     的次数真正执行 PI，其余直接返回。
+
+     放中断而不是主循环的两个理由：
+       1. 固定周期。主循环耗时随 OLED 刷新等波动，PI 的积分项对周期敏感。
+       2. 阻塞标定接口（Car_Forward 等靠 HAL_Delay）期间闭环照样工作，
+          否则那些接口一进去闭环就停摆。
+
+     这不违反"同周期只有一个模块写电机"：PI 层在仲裁层**之下**，上层设定
+     目标转速、PI 只负责实现它。调度器仍然只让一个模块设目标。 */
+  SpeedCtrl_Step();
 
   /* USER CODE END SysTick_IRQn 1 */
 }

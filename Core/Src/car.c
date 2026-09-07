@@ -8,6 +8,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "car.h"
 #include "encoder.h"
+#include "speed_ctrl.h"
 
 #include <stdio.h>
 
@@ -56,9 +57,26 @@ typedef struct
 /* Private variables ---------------------------------------------------------*/
 static Car_Action car_action;
 
+/* "车体前进" → 各电机 Motor_SetSpeedRaw 的符号。交给 speed_ctrl 用，
+   这样极性知识仍然只有本文件一份（CAR_*_POLARITY 是唯一真源）。
+   顺序与 Motor_ID 一致：M1/M2 左，M3/M4 右。 */
+static const int8_t car_out_polarity[MOTOR_NUM] =
+{
+  (int8_t)(CAR_FORWARD_POLARITY * CAR_LEFT_POLARITY),
+  (int8_t)(CAR_FORWARD_POLARITY * CAR_LEFT_POLARITY),
+  (int8_t)(CAR_FORWARD_POLARITY * CAR_RIGHT_POLARITY),
+  (int8_t)(CAR_FORWARD_POLARITY * CAR_RIGHT_POLARITY),
+};
+
 /* Private function prototypes -----------------------------------------------*/
 static uint8_t Car_ToEff(uint8_t speed);
+#if !SPEEDCTRL_ENABLE
 static int16_t Car_EffToDuty(int16_t eff);
+#endif
+#if SPEEDCTRL_ENABLE
+static int16_t Car_EffToRpm(int16_t eff);
+#endif
+static void    Car_BrakeAll(void);
 static uint16_t Car_AngleCompX1000(uint8_t speed, uint16_t radius_mm,
                                    int8_t direction);
 static void Car_RunDistance(uint8_t speed, uint32_t distance_mm, int8_t direction);
@@ -89,18 +107,65 @@ static Car_ActionStatus Car_StepRamp(uint32_t elapsed);
   */
 static void Car_Drive(int16_t left, int16_t right)
 {
+#if SPEEDCTRL_ENABLE
+  /* 闭环：把有效速度换成目标转速交给 PI，不再直写 PWM。
+     占空比由 PI 根据实测转速自己算，电池压降自动补偿。 */
+  SpeedCtrl_SetTargetRpm(Car_EffToRpm(left), Car_EffToRpm(right));
+#else
   int16_t dl = Car_EffToDuty(left);
   int16_t dr = Car_EffToDuty(right);
 
-    Motor_SetSpeedRaw(MOTOR_1,
-                    (int8_t)(CAR_FORWARD_POLARITY * CAR_LEFT_POLARITY * dl));
-  Motor_SetSpeedRaw(MOTOR_2,
-                    (int8_t)(CAR_FORWARD_POLARITY * CAR_LEFT_POLARITY * dl));
-  Motor_SetSpeedRaw(MOTOR_3,
-                    (int8_t)(CAR_FORWARD_POLARITY * CAR_RIGHT_POLARITY * dr));
-  Motor_SetSpeedRaw(MOTOR_4,
-                    (int8_t)(CAR_FORWARD_POLARITY * CAR_RIGHT_POLARITY * dr));
+  Motor_SetSpeedRaw(MOTOR_1, (int8_t)(car_out_polarity[MOTOR_1] * dl));
+  Motor_SetSpeedRaw(MOTOR_2, (int8_t)(car_out_polarity[MOTOR_2] * dl));
+  Motor_SetSpeedRaw(MOTOR_3, (int8_t)(car_out_polarity[MOTOR_3] * dr));
+  Motor_SetSpeedRaw(MOTOR_4, (int8_t)(car_out_polarity[MOTOR_4] * dr));
+#endif
 }
+
+/**
+  * @brief  交还闭环控制权并制动
+  *
+  * @note   顺序很关键：必须先 SpeedCtrl_Disable() 再 Motor_BrakeAll()。
+  *         反过来的话，SysTick 里的 SpeedCtrl_Step() 可能在制动之后又写一次
+  *         PWM，把制动状态冲掉，车会继续滑行。本文件所有制动点统一走这里。
+  */
+static void Car_BrakeAll(void)
+{
+#if SPEEDCTRL_ENABLE
+  SpeedCtrl_Disable();
+#endif
+  Motor_BrakeAll();
+}
+
+#if SPEEDCTRL_ENABLE
+/**
+  * @brief  有效速度 → 目标转速 rpm
+  * @param  eff: 有效速度 -CAR_SPEED_SPAN~CAR_SPEED_SPAN，正数向前
+  * @retval 车体系目标转速，前进为正
+  *
+  * @note   线性映射：有效速度满量程 CAR_SPEED_SPAN 对应 ENC_MAX_RPM。
+  *         这里不需要再管死区 —— 有效速度已经减掉了死区，而闭环的前馈
+  *         会把死区加回到占空比上，两边各管一段，不重不漏。
+  */
+static int16_t Car_EffToRpm(int16_t eff)
+{
+  int32_t mag = (eff >= 0) ? eff : -(int32_t)eff;
+  int32_t rpm;
+
+  if (mag == 0)
+  {
+    return 0;
+  }
+  if (mag > (int32_t)CAR_SPEED_SPAN)
+  {
+    mag = (int32_t)CAR_SPEED_SPAN;
+  }
+
+  rpm = mag * (int32_t)ENC_MAX_RPM / (int32_t)CAR_SPEED_SPAN;
+
+  return (eff >= 0) ? (int16_t)rpm : (int16_t)(-rpm);
+}
+#endif /* SPEEDCTRL_ENABLE */
 
 /**
   * @brief  占空比刻度 → 有效速度
@@ -123,13 +188,17 @@ static uint8_t Car_ToEff(uint8_t speed)
   return (uint8_t)(speed - CAR_SPEED_BASE);
 }
 
+#if !SPEEDCTRL_ENABLE
 /**
-  * @brief  有效速度 → 占空比刻度
+  * @brief  有效速度 → 占空比刻度（仅开环模式使用）
   * @param  eff: 有效速度，-CAR_SPEED_SPAN~CAR_SPEED_SPAN，正数向前
   * @retval 占空比刻度，符号保留
   *
   * @note   加回死区。有效速度 0 输出 0 而不是 BASE：输出 BASE 电机
   *         照样不转，却白白通电发热，还让被拖动的轮子多了阻力。
+  *
+  * @note   闭环模式下死区由 speed_ctrl 的前馈处理，本函数不参与编译。
+  *         保留它是为了 SPEEDCTRL_ENABLE 置 0 时能原样退回开环。
   */
 static int16_t Car_EffToDuty(int16_t eff)
 {
@@ -147,6 +216,7 @@ static int16_t Car_EffToDuty(int16_t eff)
 
   return (eff >= 0) ? mag : (int16_t)(-mag);
 }
+#endif /* !SPEEDCTRL_ENABLE */
 
 /**
   * @brief  获取角度动作的编码器目标放大系数
@@ -224,7 +294,7 @@ static int16_t Car_InnerSpeed(uint8_t outer, uint16_t radius_mm)
 static void Car_RunFor(uint16_t time)
 {
   HAL_Delay(time);
-  Motor_BrakeAll();
+  Car_BrakeAll();
 }
 
 /**
@@ -293,7 +363,7 @@ static uint8_t Car_AngleWheelSpeeds(uint8_t speed, uint16_t radius_mm,
   */
 static Car_ActionStatus Car_ActionFinish(Car_ActionStatus status)
 {
-  Motor_BrakeAll();
+  Car_BrakeAll();
   car_action.kind = CAR_ACT_NONE;
   return status;
 }
@@ -521,7 +591,7 @@ Car_ActionStatus Car_StartBrake(uint16_t time)
     return CAR_ACTION_FAILED;
   }
 
-  Motor_BrakeAll();
+  Car_BrakeAll();
   car_action.duration_ms = time;
   car_action.timeout_ms  = (uint32_t)time + CAR_ACTION_TIMEOUT_MARGIN_MS;
 
@@ -539,10 +609,35 @@ static Car_ActionStatus Car_StepDistance(uint32_t now)
 {
   int32_t  distance  = Encoder_GetDistanceAvg() - car_action.start_distance_mm;
   uint32_t travelled = (uint32_t)Car_Abs32(distance);
+  int32_t  speed_mmps = Encoder_GetSpeedMmps();
+  uint32_t lead_mm;
+  uint32_t lead_cap;
+  uint32_t stop_at;
 
-  if (travelled >= car_action.target_distance_mm)
+  /* ==== 制动提前量 ====
+     提前量 = 车速 × 等效制动时间。走够了才刹车的话，刹车过程走过的距离
+     全是净超调；提前这一段开始刹，停下时正好在目标位置附近。
+     取绝对值：后退时车速为负，提前量与方向无关。 */
+  lead_mm = (uint32_t)((uint64_t)Car_Abs32(speed_mmps) * CAR_BRAKE_LEAD_MS
+                       / 1000ULL);
+
+  /* 短距离动作要防提前量吃掉整个目标 —— 否则目标 100mm 而提前量 120mm 时
+     一进来就判停，车根本没动。按比例截断。 */
+  lead_cap = car_action.target_distance_mm * CAR_BRAKE_LEAD_MAX_PCT / 100U;
+  if (lead_mm > lead_cap)
   {
-    printf("[DIST] stop travelled=%lumm\r\n", (unsigned long)travelled);
+    lead_mm = lead_cap;
+  }
+
+  stop_at = car_action.target_distance_mm - lead_mm;
+
+  if (travelled >= stop_at)
+  {
+    printf("[DIST] stop travelled=%lumm target=%lumm lead=%lumm speed=%ldmm/s\r\n",
+           (unsigned long)travelled,
+           (unsigned long)car_action.target_distance_mm,
+           (unsigned long)lead_mm,
+           (long)speed_mmps);
     return Car_ActionFinish(CAR_ACTION_DONE);
   }
 
@@ -713,6 +808,12 @@ void Car_Init(void)
 {
   Motor_Init();
   car_action.kind = CAR_ACT_NONE;
+
+#if SPEEDCTRL_ENABLE
+  /* 把极性表交给闭环。CAR_*_POLARITY 仍只在本文件定义，speed_ctrl 不重复
+     一份 —— 以后改接线只改这里。 */
+  SpeedCtrl_Init(car_out_polarity);
+#endif
 }
 
 /**
@@ -753,7 +854,7 @@ void Car_ForwardRun(uint8_t speed)
   */
 void Car_Stop(void)
 {
-  Motor_BrakeAll();
+  Car_BrakeAll();
 }
 
 /**
@@ -885,7 +986,7 @@ void Car_TurnRightAngle(uint8_t speed, uint16_t radius_mm, uint32_t angle_deg10)
   */
 void Car_Brake(uint16_t time)
 {
-  Motor_BrakeAll();
+  Car_BrakeAll();
   if (time > 0U)
   {
     HAL_Delay(time);

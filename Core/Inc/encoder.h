@@ -81,6 +81,23 @@ extern "C" {
    够用了。低于这个间隔的 Update 只累加里程、不更新转速。 */
 #define ENC_SPEED_PERIOD_MS  20U
 
+/* ==== 满占空比车轮转速 rpm（**必须实测**）===================================
+   转速闭环用它把"占空比刻度 0~100"映射成"目标 rpm"，也是前馈的比例基准。
+
+   下面这个 152 是**某次实测的平均结果**。
+   MG310 空载轴转速约 6000rpm、
+   减速比 20，理论轮速 300rpm，但带载和电池压降后实际值低得多。
+
+   实测方法：main.c 里放开 Car_ForwardDistance(100U, 2000U)，跑一次全速直线，
+   看串口 [DIST] 行打印的四路 rpm，取稳定段的平均值填进来。
+
+   填偏了的后果（都不危险，但要知道）：
+     - 填**大**了：目标 rpm 算得偏高，PI 一直饱和在满占空比，闭环退化成开环，
+       行为与改造前一致，不会失控。
+     - 填**小**了：目标 rpm 偏低，车跑不到满速，相当于被限速。
+   ============================================================================ */
+#define ENC_MAX_RPM          152
+
 /* Exported functions prototypes ---------------------------------------------*/
 void    Encoder_Init(void);
 void    Encoder_Update(void);
@@ -92,6 +109,10 @@ int16_t Encoder_GetSpeedRpm(Motor_ID motor);
 int32_t Encoder_GetDistanceAvg(void);
 int32_t Encoder_GetDistanceLeft(void);
 int32_t Encoder_GetDistanceRight(void);
+
+/* 四轮平均车速，单位 mm/s，前进为正。与里程用同一套标定系数，
+   所以"速度×时间"和里程读数是自洽的。制动提前量用它算。 */
+int32_t Encoder_GetSpeedMmps(void);
 
 /* 根据左右轮有符号里程差估算车体转角，单位 0.1 度。
    正值表示左转，负值表示右转；wheel_track_mm 为左右轮中心距。 */

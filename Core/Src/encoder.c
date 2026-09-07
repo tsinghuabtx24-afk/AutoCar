@@ -240,6 +240,34 @@ int32_t Encoder_GetRotationDeg10(uint16_t wheel_track_mm)
 }
 
 /**
+  * @brief  四轮平均车速 mm/s（前进为正）
+  *
+  * @note   mm/s = rpm × π·D / 60，再乘标定系数。用的是和 Encoder_CountToMm()
+  *         完全相同的 π 近似（355/113）和 CAL_NUM/CAL_DEN，所以"速度×时间"
+  *         与里程读数自洽 —— 制动提前量拿它算才不会和判停用的里程打架。
+  *
+  * @note   先求四轮 rpm 之和再一次换算，而不是逐轮换算后相加：整数除法
+  *         每次都截断，逐轮换算会引入四次舍入误差。
+  */
+int32_t Encoder_GetSpeedMmps(void)
+{
+  int32_t sum_rpm = 0;
+  int64_t num;
+  int64_t den;
+
+  for (Motor_ID m = MOTOR_1; m < MOTOR_NUM; m++)
+  {
+    sum_rpm += (int32_t)enc[m].rpm;
+  }
+
+  /* 四轮平均：分母里多乘一个 MOTOR_NUM */
+  num = (int64_t)sum_rpm * 355LL * (int64_t)ENC_WHEEL_DIA_MM * ENC_CAL_NUM;
+  den = 113LL * 60LL * (int64_t)MOTOR_NUM * ENC_CAL_DEN;
+
+  return (int32_t)(num / den);
+}
+
+/**
   * @brief  清零一路编码器的累计量
   * @note   同步刷新 last_cnt，否则下次 Update 会把清零期间的 CNT 变化
   *         当成增量补回来，等于没清干净。
