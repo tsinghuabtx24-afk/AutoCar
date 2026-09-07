@@ -14,6 +14,7 @@
 #include "ir_avoid.h"
 #include "ultrasonic_sense.h"
 #include "line_tracker.h"
+#include "vision_nav.h"
 
 #include <stdio.h>
 
@@ -80,6 +81,9 @@ static void Scheduler_EnterStop(void)
   Car_ActionAbort();
   VisionTask_Cancel();
   AvoidTask_Cancel();
+  /* 放弃未走完的视觉机动：急停后车身姿态已不确定，两段式转向的第二段
+     再执行只会把车带偏。 */
+  VisionNav_Reset();
   Car_Stop();
   scheduler_preempted = CONTROL_LINE_TRACK;
   Scheduler_SetMode(CONTROL_STOP);
@@ -213,11 +217,24 @@ void Scheduler_OnEvent(const Event *e)
   /* ---- 视觉事件 ---- */
   if (Scheduler_IsVisionEvent(e->type) != 0U)
   {
+    /* 先过视觉导航的门控：门没开一律丢弃；左/右转信号被转成内部两段式
+       机动，同样不在这里执行。返回 1 才是"该照常执行"的事件。 */
+    if (VisionNav_OnVisionEvent(e->type) == 0U)
+    {
+      return;
+    }
+
     /* 限速类只改巡线速度，不建任务、不切模式；任务类建任务并抢占。
        VisionTask_Begin() 返回 1 表示确实起了一个占用底盘的任务。 */
     if (VisionTask_Begin(e->type) != 0U)
     {
       Scheduler_SetMode(CONTROL_TASK);
+    }
+    else
+    {
+      /* 限速/恢复限速改的是 task_speed，把它同步到循迹的运行时基础速度，
+         否则这个事件只会体现在诊断打印里，对车速没有任何影响。 */
+      LineTracker_SetBaseSpeed(VisionTask_GetSpeed());
     }
   }
 }

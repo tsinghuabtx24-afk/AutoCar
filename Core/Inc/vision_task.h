@@ -12,9 +12,13 @@ extern "C" {
 /* ==== 速度配置 ==============================================================
    巡线默认速度与限速后的速度。速度刻度沿用 car 模块的 0~100 占空比刻度。
    ============================================================================ */
-#define VISION_SPEED_NORMAL        70U
-#define VISION_SPEED_LIMIT_DROP    10U
+#define VISION_SPEED_NORMAL        85U
+#define VISION_SPEED_LIMIT_DROP    20U
 #define VISION_SPEED_FULL          100U
+
+/* _Static_assert 见 vision_task.c：限速后的速度必须仍在死区之上。
+   注意 VISION_SPEED_NORMAL 应与 LINE_BASE_SPEED 一致，否则"解除限速"会把
+   循迹速度改成另一个值。 */
 
 /* 转向：原地旋转 90.0°，单位 0.1 度。 */
 #define VISION_TURN_SPEED          80U

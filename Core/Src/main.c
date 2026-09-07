@@ -44,6 +44,7 @@
 #include "avoid_task.h"
 #include "indicator.h"
 #include "ultrasonic_sense.h"
+#include "vision_nav.h"
 
 #include <stdio.h>
 
@@ -262,6 +263,7 @@ int main(void)
   ManualTask_Init();
   UltrasonicSense_Init();
   AvoidTask_Init();
+  VisionNav_Init();
   LineTracker_Init();
   Scheduler_Init();
 
@@ -286,7 +288,7 @@ int main(void)
           遥控必须每轮采样——RED 双击是进入手动模式的唯一入口。
           视觉帧由 UART2 中断直接投递事件，这里无需轮询。 */
     ManualTask_Sense();
-    IrAvoid_Sense();
+    // IrAvoid_Sense();
     UltrasonicSense_Sense();
 
     /* 2. 调度层：消费事件，决定控制模式。 */
@@ -308,7 +310,7 @@ int main(void)
         printf("[DIAG] mode=%s speed=%u ir=%s front=%umm | RX count=%lu "
                "last=0x%02X errors=%lu resync=%lu code=0x%08lX | "
                "REMOTE dropped=%lu | EVT posted=%lu dropped=%lu | "
-               "AVOID %s step=%u\r\n",
+               "AVOID %s step=%u | VNAV %s open=%u rej=%lu base=%u\r\n",
                Scheduler_ModeName(Scheduler_GetMode()),
                (unsigned)VisionTask_GetSpeed(),
                IrAvoid_StateName(IrAvoid_GetState()),
@@ -322,7 +324,11 @@ int main(void)
                (unsigned long)Event_GetPostedCount(),
                (unsigned long)Event_GetDroppedCount(),
                AvoidTask_StateName(AvoidTask_GetState()),
-               (unsigned)AvoidTask_GetStep());
+               (unsigned)AvoidTask_GetStep(),
+               VisionNav_StateName(VisionNav_GetState()),
+               (unsigned)VisionNav_IsVisionOpen(),
+               (unsigned long)VisionNav_GetRejectedCount(),
+               (unsigned)LineTracker_GetBaseSpeed());
       }
     }
 
