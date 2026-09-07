@@ -289,7 +289,7 @@ int main(void)
           视觉帧由 UART2 中断直接投递事件，这里无需轮询。 */
     ManualTask_Sense();
     // IrAvoid_Sense();
-    // UltrasonicSense_Sense();
+    UltrasonicSense_Sense();
 
     /* 2. 调度层：消费事件，决定控制模式。 */
     Scheduler_DrainEvents();

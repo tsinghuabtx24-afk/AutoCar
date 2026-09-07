@@ -26,6 +26,13 @@ _Static_assert((LINE_BASE_SPEED - 2U * LINE_DIFF_STEP) > CAR_SPEED_BASE,
 _Static_assert((LINE_BASE_SPEED + 2U * LINE_DIFF_STEP) <= MOTOR_SPEED_MAX,
                "LINE_BASE_SPEED + max diff exceeds MOTOR_SPEED_MAX");
 
+/* 阈值高于窗长的话永远凑不满，边缘图案就再也不会改判原地转。 */
+_Static_assert(LINE_EDGE_WHITE_COUNT <= LINE_EDGE_WATCH_CYCLES,
+               "LINE_EDGE_WHITE_COUNT exceeds LINE_EDGE_WATCH_CYCLES: edge "
+               "patterns could never escalate to pivot");
+_Static_assert(LINE_EDGE_WHITE_COUNT >= 1U,
+               "LINE_EDGE_WHITE_COUNT must be at least 1");
+
 /* 循迹内部状态。原地转是一个持续若干周期的相位，需要记住方向。 */
 typedef enum
 {
@@ -45,6 +52,15 @@ static uint16_t line_lost_count;
 static uint8_t  line_base_speed = LINE_BASE_SPEED;
 /* 视觉旋转的起始编码器角度快照，用于打印实测转角供标定。 */
 static int32_t  line_turn_start_deg10;
+
+/* ---- 偏离图案（0001/1000/0011/1100）的观察窗 ----
+   见 line_tracker.h。看到这些图案时开窗，窗口内数全白次数，够多就改判原地转。 */
+static uint8_t  line_edge_watch;      /* 0=未开窗 */
+static int8_t   line_edge_dir;        /* 开窗时记下的方向：+1 左转，-1 右转 */
+static uint8_t  line_edge_left;       /* 观察窗剩余周期数 */
+static uint8_t  line_edge_white;      /* 窗口内累计的全白次数 */
+
+static void LineTracker_EdgeWatchCancel(void);
 
 uint8_t LineTracker_ReadPattern(void)
 {
@@ -113,6 +129,8 @@ void LineTracker_Reset(void)
     VisionNav_Reset();
   }
 
+  LineTracker_EdgeWatchCancel();
+
   line_mode        = LINE_MODE_DIFF;
   line_pivot_dir   = 0;
   line_lost_count  = 0U;
@@ -145,16 +163,19 @@ static uint8_t LineTracker_Decode(uint8_t pattern, int8_t *level)
   {
     case 0x09U: *level =  0; return 1U;  /* 1001：轨迹中心 */
 
-    case 0x01U: 
-    // *level =  3; return 1U;  /* 0001：微右偏或大右转信号，如今处理为大右转信号 */
+    /* 0001：先按微右偏处理，同时开观察窗；窗口内全白够多则改判原地转。
+       见 line_tracker.h 的"单侧边缘图案的两段判定"。 */
+    case 0x01U: *level =  1; return 1U;
     case 0x0BU: *level =  1; return 1U;  /* 1011：微右偏 */
-    case 0x03U: *level =  2; return 1U;  /* 0011：轨迹右端 */
+    /* 0011：轨迹右端。先按 2 档处理，同样开观察窗。 */
+    case 0x03U: *level =  2; return 1U;
     case 0x07U: *level =  3; return 1U;  /* 0111：轨迹极右 */
 
-    case 0x08U: 
-    //*level = -3; return 1U;  /* 1000：微左偏或大左转信号，如今处理为大左转信号 */
+    /* 1000：同上，先按微左偏处理并开观察窗。 */
+    case 0x08U: *level = -1; return 1U;
     case 0x0DU: *level = -1; return 1U;  /* 1101：微左偏 */
-    case 0x0CU: *level = -2; return 1U;  /* 1100：轨迹左端 */
+    /* 1100：轨迹左端。先按 2 档处理，同样开观察窗。 */
+    case 0x0CU: *level = -2; return 1U;
     case 0x0EU: *level = -3; return 1U;  /* 1110：轨迹极左 */
 
     default:    *level =  0; return 0U;
@@ -179,6 +200,96 @@ static void LineTracker_DriveDiff(int8_t level)
 }
 
 /**
+  * @brief  关掉边缘观察窗
+  */
+static void LineTracker_EdgeWatchCancel(void)
+{
+  line_edge_watch = 0U;
+  line_edge_dir   = 0;
+  line_edge_left  = 0U;
+  line_edge_white = 0U;
+}
+
+/**
+  * @brief  这个图案要开观察窗吗
+  * @note   只有含义有歧义的四个：0001/1000（1 档）和 0011/1100（2 档）。
+  *         1011/1101 中间那路还压着线，不歧义，不开。
+  */
+static uint8_t LineTracker_IsWatchPattern(uint8_t pattern)
+{
+  return (uint8_t)((pattern == LINE_PATTERN_EDGE_R) ||
+                   (pattern == LINE_PATTERN_EDGE_L) ||
+                   (pattern == LINE_PATTERN_END_R)  ||
+                   (pattern == LINE_PATTERN_END_L));
+}
+
+/**
+  * @brief  看到偏离图案，开观察窗
+  * @param  level: Decode 给出的偏差档位，其符号就是要转的方向
+  *
+  * @note   同方向的窗口已经开着就不重开——偏离图案通常连着好几个周期都在，
+  *         每次都重置计数的话窗口永远走不完，全白次数也永远凑不满。
+  *         这也让 0011→0001 这种"越偏越多"的序列共用一个窗口，不会因为
+  *         图案换了就把已经数到的全白丢掉。
+  */
+static void LineTracker_EdgeWatchArm(int8_t level)
+{
+  int8_t dir = (level > 0) ? 1 : -1;
+
+  if ((line_edge_watch != 0U) && (line_edge_dir == dir))
+  {
+    return;
+  }
+
+  line_edge_watch = 1U;
+  line_edge_dir   = dir;
+  line_edge_left  = LINE_EDGE_WATCH_CYCLES;
+  line_edge_white = 0U;
+}
+
+/**
+  * @brief  推进观察窗一个周期
+  * @param  pattern: 本周期读到的图案
+  * @retval 1=全白够多，应改判原地转（方向在 *level 里）；0=不需要
+  *
+  * @note   窗口自然到期就作废，不留状态：那说明只是微偏，差速已经在修了。
+  */
+static uint8_t LineTracker_EdgeWatchStep(uint8_t pattern, int8_t *level)
+{
+  if (line_edge_watch == 0U)
+  {
+    return 0U;
+  }
+
+  if (pattern == LINE_PATTERN_ALL_WHITE)
+  {
+    line_edge_white++;
+
+    if (line_edge_white >= LINE_EDGE_WHITE_COUNT)
+    {
+      /* 翻案：这不是微偏，是弯道。方向用开窗时记下的那个——此刻四路全白，
+         当前图案已经给不出方向了。 */
+      *level = (int8_t)(line_edge_dir * 3);
+      printf("[LINE] edge escalated to pivot (%u white in window)\r\n",
+             (unsigned)line_edge_white);
+      LineTracker_EdgeWatchCancel();
+      return 1U;
+    }
+  }
+
+  if (line_edge_left > 0U)
+  {
+    line_edge_left--;
+  }
+  if (line_edge_left == 0U)
+  {
+    LineTracker_EdgeWatchCancel();
+  }
+
+  return 0U;
+}
+
+/**
   * @brief  进入大偏差原地转
   * @note   不用 Car_StartRotateAngle()：那是"转到指定角度就停"，而循迹要的是
   *         "转到压回线就停"。后者是传感器闭环，比按角度开环更准，也不依赖
@@ -187,6 +298,9 @@ static void LineTracker_DriveDiff(int8_t level)
   */
 static void LineTracker_EnterPivot(int8_t level)
 {
+  /* 已经在转了，观察窗没意义了。 */
+  LineTracker_EdgeWatchCancel();
+
   line_pivot_dir  = (level > 0) ? 1 : -1;
   line_pivot_tick = HAL_GetTick();
   line_mode       = LINE_MODE_PIVOT;
@@ -292,12 +406,33 @@ void LineTracker_Step(void)
       if (Car_StartRotateAngle(VNAV_TURN_SPEED, turn_deg10) == CAR_ACTION_BUSY)
       {
         line_turn_start_deg10 = Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM);
+        /* 视觉旋转期间 Step 会提前 return，观察窗推不动。转完车身姿态已经变了，
+           窗口的前提（正在跟线做微偏修正）不再成立，直接作废，免得旋转结束后
+           拿着旧方向误判一次原地转。 */
+        LineTracker_EdgeWatchCancel();
         line_mode = LINE_MODE_VISION_TURN;
         return;
       }
       /* 发起失败：告知 vision_nav 结束这一相，避免它卡在 RUN 状态。 */
       printf("[LINE] vision turn rejected\r\n");
       VisionNav_OnTurnDone(0);
+    }
+  }
+
+  /* ---- 边缘观察窗：数全白，够多就把之前的"微偏"改判成原地转 ----
+     必须放在全白判定**之前**：全白那一段会 return，放后面就永远数不到
+     它要数的那个图案。只在 DIFF 模式下改判——已经在 pivot 里没必要重来，
+     LOST 时该做的是重新找线而不是转。 */
+  {
+    int8_t esc_level = 0;
+
+    if ((LineTracker_EdgeWatchStep(pattern, &esc_level) != 0U) &&
+        (line_mode == LINE_MODE_DIFF))
+    {
+      line_lost_count = 0U;   /* 转弯中四路离线是正常的，不算丢线 */
+      LineTracker_EnterPivot(esc_level);
+      LineTracker_DrivePivot();
+      return;
     }
   }
 
@@ -313,7 +448,7 @@ void LineTracker_Step(void)
   }
 
   /* ---- 丢线持续判定：全白且持续足够多个周期 ---- */
-  if (pattern == 0x0FU)
+  if (pattern == LINE_PATTERN_ALL_WHITE)
   {
     if (line_lost_count < 0xFFFFU)
     {
@@ -383,6 +518,13 @@ void LineTracker_Step(void)
     LineTracker_EnterPivot(level);
     LineTracker_DrivePivot();
     return;
+  }
+
+  /* ---- 偏离图案：按原有档位差速走，同时开观察窗盯住后面几个周期 ----
+     0001/1000（1 档）和 0011/1100（2 档）都开窗，见 LineTracker_IsWatchPattern()。 */
+  if (LineTracker_IsWatchPattern(pattern) != 0U)
+  {
+    LineTracker_EdgeWatchArm(level);
   }
 
   LineTracker_DriveDiff(level);
