@@ -31,7 +31,10 @@ typedef enum
   INDICATOR_PRIO_SIGNAL,   /* 视觉信号灯效：隧道白灯、友军短闪。短时且不占底盘，
                               压在 TASK 之上，否则会被同时在跑的任务灯覆盖 */
   INDICATOR_PRIO_MANUAL,   /* 遥控手动接管提示 */
-  INDICATOR_PRIO_AVOID,    /* 避障告警 */
+  INDICATOR_PRIO_CALL_ALLY,    /* 呼唤友军（遥控"9"）：两短闪循环 + 鸣笛。
+                              压在 MANUAL 之上，否则手动接管的蓝灯常亮会把
+                              呼唤闪灯整个盖掉，看不出车在传讯 */
+  INDICATOR_PRIO_AVOID,    /* 避障呼唤 */
   INDICATOR_PRIO_FAULT,    /* 急停 / 故障 */
   INDICATOR_PRIO_COUNT
 } Indicator_Prio;

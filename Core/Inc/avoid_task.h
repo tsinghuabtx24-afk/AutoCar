@@ -108,8 +108,18 @@ typedef enum
 
 void AvoidTask_Init(void);
 
-/* 调度器切入 CONTROL_IR_AVOID 时调用一次。 */
+/* 调度器切入 CONTROL_IR_AVOID 时调用一次。绕行方向由传感器读数决定；
+   若此刻传感器已报无障碍，则不绕行、立即交还控制权。 */
 void AvoidTask_Begin(void);
+
+/* 视觉触发的绕行（倒塌房屋）：不查传感器，直接按给定方向走完固定序列。
+   @param mirror +1 = 右绕，-1 = 左绕
+
+   为什么需要单独一个入口：AvoidTask_Begin() 用传感器读数选绕行方向，读到
+   "无障碍"就直接放弃。视觉识别到倒塌房屋时车通常还离得远，红外/超声都还
+   没报警（何况这两路采样在 main.c 里是可以关掉的），走 Begin() 会当场
+   判成"没有障碍"什么都不做。这里把方向作为参数传进来，绕行与传感器解耦。 */
+void AvoidTask_BeginDetour(int8_t mirror);
 
 /*
  * 每轮推进。返回 1=仍占用底盘，0=已结束（调度器应交还控制权）。

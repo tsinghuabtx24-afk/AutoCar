@@ -38,9 +38,12 @@ static Event_Type ManualTask_CommandToEvent(uint8_t command)
   switch (IrRemote_GetAction(command))
   {
     case IR_REMOTE_ACTION_FORWARD:      return EVENT_REMOTE_FORWARD;
+    case IR_REMOTE_ACTION_BACKWARD:     return EVENT_REMOTE_BACKWARD;
     case IR_REMOTE_ACTION_ROTATE_LEFT:  return EVENT_REMOTE_ROTATE_LEFT;
     case IR_REMOTE_ACTION_ROTATE_RIGHT: return EVENT_REMOTE_ROTATE_RIGHT;
     case IR_REMOTE_ACTION_HORN:         return EVENT_REMOTE_HORN;
+    case IR_REMOTE_ACTION_TURN_AROUND:  return EVENT_REMOTE_TURN_AROUND;
+    case IR_REMOTE_ACTION_CALL_ALLY:   return EVENT_REMOTE_CALL_ALLY;
     default:                            break;
   }
 
@@ -174,6 +177,19 @@ void ManualTask_Step(void)
     case EVENT_REMOTE_HORN:
       /* 鸣笛不占底盘，只是停车鸣笛。 */
       Car_Stop();
+      break;
+
+    case EVENT_REMOTE_TURN_AROUND:
+      /* 原地旋转180° - 在手动模式下执行 */
+      Car_Stop();
+      (void)Car_StartRotateAngle(80U, 1800);
+      /* 注意：这里需要等待旋转完成，或者由调度器处理 */
+      break;
+
+    case EVENT_REMOTE_CALL_ALLY:
+      /* 呼唤友军：原地鸣笛闪灯8s - 在手动模式下执行 */
+      Car_Stop();
+      /* 由 VisionTask_StartCallAlly() 处理 */
       break;
 
     default:

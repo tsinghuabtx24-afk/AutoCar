@@ -45,7 +45,6 @@
 #include "indicator.h"
 #include "buzzer_tone.h"
 #include "ultrasonic_sense.h"
-#include "vision_nav.h"
 
 #include <stdio.h>
 
@@ -265,7 +264,6 @@ int main(void)
   ManualTask_Init();
   UltrasonicSense_Init();
   AvoidTask_Init();
-  VisionNav_Init();
   LineTracker_Init();
   Scheduler_Init();
 
@@ -312,7 +310,7 @@ int main(void)
         printf("[DIAG] mode=%s speed=%u ir=%s front=%umm | RX count=%lu "
                "last=0x%02X errors=%lu resync=%lu code=0x%08lX | "
                "REMOTE dropped=%lu | EVT posted=%lu dropped=%lu | "
-               "AVOID %s step=%u | VNAV %s open=%u rej=%lu base=%u\r\n",
+               "AVOID %s step=%u | silenced=%lu base=%u\r\n",
                Scheduler_ModeName(Scheduler_GetMode()),
                (unsigned)VisionTask_GetSpeed(),
                IrAvoid_StateName(IrAvoid_GetState()),
@@ -327,9 +325,7 @@ int main(void)
                (unsigned long)Event_GetDroppedCount(),
                AvoidTask_StateName(AvoidTask_GetState()),
                (unsigned)AvoidTask_GetStep(),
-               VisionNav_StateName(VisionNav_GetState()),
-               (unsigned)VisionNav_IsVisionOpen(),
-               (unsigned long)VisionNav_GetRejectedCount(),
+               (unsigned long)VisionUart_GetSilencedCount(),
                (unsigned)LineTracker_GetBaseSpeed());
       }
     }
@@ -351,7 +347,7 @@ int main(void)
 
     /* 超声波避障已并入 avoid_task（阶段 4），正式路径由调度器驱动。
        旧的 UltrasonicAvoid_Handle() 保留为独立调试入口，但它直写 RGB 和
-       蜂鸣器、绕过指示层，启用时会和正式告警互相覆盖。 */
+       蜂鸣器、绕过指示层，启用时会和正式呼唤互相覆盖。 */
     // if (UltrasonicAvoid_Handle() == 0U)
     // {
     //   Car_ForwardRun(70U);

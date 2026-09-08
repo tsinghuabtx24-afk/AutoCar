@@ -28,25 +28,21 @@ typedef enum
 {
   EVENT_NONE = 0,
 
-  /* 视觉识别。
-     这一段必须连续：scheduler 用 [EVENT_VISION_SPEED_LIMIT, EVENT_VISION_LAST]
-     的区间判断"是不是视觉事件"，新增视觉事件一律加在 EVENT_VISION_LAST 之前。 */
-  EVENT_VISION_SPEED_LIMIT,
-  EVENT_VISION_SPEED_RELEASE,
-  EVENT_VISION_TURN_LEFT,
-  EVENT_VISION_TURN_RIGHT,
-  EVENT_VISION_HORN,
-  EVENT_VISION_PARK_1,
-  EVENT_VISION_PARK_2,
+  /* 视觉识别（7个类别）。
+     这一段必须连续：scheduler 用 [EVENT_VISION_FIRST, EVENT_VISION_LAST]
+     的区间判断"是不是视觉事件"。 */
+  EVENT_VISION_FIRST,
 
-  /* 隧道：常亮白灯 5s。不占底盘，循迹继续。 */
-  EVENT_VISION_TUNNEL,
-  /* 起伏路段：限速 5s 后自动恢复原速。不占底盘。 */
-  EVENT_VISION_ROUGH_ROAD,
-  /* 友军：RGB 短闪一次 + 一段有音调的旋律。不占底盘。 */
-  EVENT_VISION_FRIENDLY,
+  /* 顺序与 Vision_Target 一致（上位机类别号 0~6），便于对照。 */
+  EVENT_VISION_NO_ENTRY = EVENT_VISION_FIRST,   /* 0 禁止通行：后退→右转→前进 */
+  EVENT_VISION_SLOW_AHEAD,                      /* 1 前方慢行：限速 */
+  EVENT_VISION_FRIENDLY,                        /* 2 友军信号：停车鸣笛×4 */
+  EVENT_VISION_TUNNEL,                          /* 3 隧道：白灯常亮 */
+  EVENT_VISION_NARROW_STREET,                   /* 4 狭窄街道：黄灯闪烁 */
+  EVENT_VISION_WAREHOUSE,                       /* 5 仓库：进库机动 */
+  EVENT_VISION_COLLAPSED_HOUSE,                 /* 6 倒塌房屋：走避障逻辑 */
 
-  EVENT_VISION_LAST = EVENT_VISION_FRIENDLY,
+  EVENT_VISION_LAST = EVENT_VISION_COLLAPSED_HOUSE,
 
   /* 避障传感器。红外分左右，超声波只报前方。 */
   EVENT_OBSTACLE_LEFT,
@@ -66,6 +62,10 @@ typedef enum
   EVENT_REMOTE_ROTATE_LEFT,
   EVENT_REMOTE_ROTATE_RIGHT,
   EVENT_REMOTE_HORN,
+
+  /* 新增遥控命令 */
+  EVENT_REMOTE_CALL_ALLY,         /* 按键"9"（0x1A）：呼唤友军：原地鸣笛闪灯8s */
+  EVENT_REMOTE_TURN_AROUND,        /* 按键"8"（0x19）：原地旋转180° */
 
   /* 故障：动作连续失败、传感器异常等 */
   EVENT_FAULT

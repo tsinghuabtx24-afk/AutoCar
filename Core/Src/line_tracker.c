@@ -10,7 +10,6 @@
 #include "event.h"
 #include "encoder.h"
 #include "retarget.h"
-#include "vision_nav.h"
 
 #include <stdio.h>
 
@@ -38,7 +37,6 @@ typedef enum
 {
   LINE_MODE_DIFF = 0,       /* 差速连续修正 */
   LINE_MODE_PIVOT,          /* 大偏差原地转，边转边看传感器 */
-  LINE_MODE_VISION_TURN,    /* 视觉导航的定角旋转（vision_nav 发起） */
   LINE_MODE_LOST            /* 判定丢线，已制动 */
 } LineTracker_Mode;
 
@@ -51,7 +49,6 @@ static uint16_t line_lost_count;
 /* 基础速度。默认为 LINE_BASE_SPEED，视觉限速/恢复时由调度器改写。 */
 static uint8_t  line_base_speed = LINE_BASE_SPEED;
 /* 视觉旋转的起始编码器角度快照，用于打印实测转角供标定。 */
-static int32_t  line_turn_start_deg10;
 
 /* ---- 偏离图案（0001/1000/0011/1100）的观察窗 ----
    见 line_tracker.h。看到这些图案时开窗，窗口内数全白次数，够多就改判原地转。 */
@@ -59,6 +56,16 @@ static uint8_t  line_edge_watch;      /* 0=未开窗 */
 static int8_t   line_edge_dir;        /* 开窗时记下的方向：+1 左转，-1 右转 */
 static uint8_t  line_edge_left;       /* 观察窗剩余周期数 */
 static uint8_t  line_edge_white;      /* 窗口内累计的全白次数 */
+
+/* 黑线暂停：连续全黑计数、暂停起始时刻、是否允许再次触发 */
+static uint8_t  line_black_count;
+static uint32_t line_black_pause_tick;   /* 0 = 不在暂停中 */
+static uint8_t  line_black_armed;
+
+/* 补给岔道规则：0=未武装，1=已武装等全黑，2=见过全黑等全白 */
+static uint8_t  line_fork_stage;
+static uint32_t line_fork_arm_tick;   /* 武装时刻，用于总超时 */
+static uint32_t line_fork_black_tick; /* 见到全黑的时刻，用于等白时限 */
 
 static void LineTracker_EdgeWatchCancel(void);
 
@@ -119,29 +126,37 @@ uint8_t LineTracker_GetBaseSpeed(void) { return line_base_speed; }
 
 void LineTracker_Reset(void)
 {
-  /* 若在视觉旋转途中被抢占（避障/手动接管都会 Car_ActionAbort()），必须告知
-     vision_nav 放弃本次机动。否则它永远停在 TURN_*_RUN 等一个再也不会来的
-     OnTurnDone()，视觉门此后再也不会打开。
-     选择放弃整个机动而不是"接着转"：被抢占后车身姿态已变，第二段反向转会
-     把车带偏——与急停时的处理一致。 */
-  if (line_mode == LINE_MODE_VISION_TURN)
-  {
-    VisionNav_Reset();
-  }
-
   LineTracker_EdgeWatchCancel();
 
   line_mode        = LINE_MODE_DIFF;
   line_pivot_dir   = 0;
   line_lost_count  = 0U;
   line_last_pattern = 0xFFU;
-  line_last_tick   = 0U;   /* 立刻允许下一次控制计算 */
+  line_last_tick   = 0U;   /* 立刻允许下一次控制计算 (see fork note below) */
+
+  /* 黑线暂停状态清掉：被抢占（视觉任务/避障/手动）后回到循迹时，那次暂停的
+     计时早已过期，留着会让恢复后的第一个周期误判成"还在暂停中"。
+     armed 置 1 = 恢复后遇到下一片黑区可以正常再停一次。 */
+  line_black_count      = 0U;
+  line_black_pause_tick = 0U;
+  line_black_armed      = 1U;
+
   /* 基础速度**不重置**：限速是持续配置，被避障打断后应该保持，
      由视觉的"解除限速"事件恢复。 */
+
+  /* 岔道武装状态**也不重置**，这一条是必需的而非可选：
+     补给掉头在 VisionTask 里武装，紧接着调度器就会切回 CONTROL_LINE_TRACK
+     并调到这里。若在此清掉，刚武装的规则当场失效，岔道永远等不到左转。
+     要解除请显式调 LineTracker_DisarmForkLeft()（急停走这条路）。 */
 }
 
 void LineTracker_Init(void)
 {
+  /* Reset() 有意不清岔道状态（见其中注释），所以上电初值在这里给。 */
+  line_fork_stage      = 0U;
+  line_fork_arm_tick   = 0U;
+  line_fork_black_tick = 0U;
+
   LineTracker_Reset();
   Car_Stop();
   printf("[LINE] init S1..S4: black=0 white=1, base=%u diff=%u\r\n",
@@ -296,6 +311,79 @@ static uint8_t LineTracker_EdgeWatchStep(uint8_t pattern, int8_t *level)
   *         CAR_ROT_COMP_* 滑移补偿表。用瞬时接口 + 每周期判退出即可，
   *         同样是非阻塞的。
   */
+void LineTracker_ArmForkLeft(void)
+{
+  line_fork_stage      = 1U;
+  line_fork_arm_tick   = HAL_GetTick();
+  line_fork_black_tick = 0U;
+  printf("[LINE] fork-left armed\r\n");
+}
+
+void LineTracker_DisarmForkLeft(void)
+{
+  if (line_fork_stage != 0U)
+  {
+    printf("[LINE] fork-left disarmed\r\n");
+  }
+  line_fork_stage = 0U;
+}
+
+uint8_t LineTracker_IsForkArmed(void)
+{
+  return (uint8_t)((line_fork_stage != 0U) ? 1U : 0U);
+}
+
+/**
+  * @brief  推进岔道规则的两段判定
+  * @param  pattern 本周期图案
+  * @param  now     当前 tick
+  * @retval 1=此刻应当左转，0=不动作
+  */
+static uint8_t LineTracker_ForkStep(uint8_t pattern, uint32_t now)
+{
+  if (line_fork_stage == 0U)
+  {
+    return 0U;
+  }
+
+  /* 总超时：挂太久说明这趟没碰到岔道，别一直等着。 */
+  if ((uint32_t)(now - line_fork_arm_tick) >= LINE_FORK_ARM_TIMEOUT_MS)
+  {
+    printf("[LINE] fork-left timeout, disarm\r\n");
+    line_fork_stage = 0U;
+    return 0U;
+  }
+
+  if (line_fork_stage == 1U)
+  {
+    /* 等岔道口的全黑。 */
+    if (pattern == LINE_PATTERN_ALL_BLACK)
+    {
+      line_fork_stage      = 2U;
+      line_fork_black_tick = now;
+      printf("[LINE] fork-left: all-black seen, waiting white\r\n");
+    }
+    return 0U;
+  }
+
+  /* stage 2：见过全黑，等全白。 */
+  if (pattern == LINE_PATTERN_ALL_WHITE)
+  {
+    printf("[LINE] fork-left: white after black -> pivot left\r\n");
+    line_fork_stage = 0U;    /* 一次性，转完不再触发 */
+    return 1U;
+  }
+
+  /* 等白超时：这次全黑不是岔道口，退回等下一次全黑。
+     不直接解除武装——真正的岔道可能还在后面。 */
+  if ((uint32_t)(now - line_fork_black_tick) >= LINE_FORK_WHITE_WAIT_MS)
+  {
+    line_fork_stage = 1U;
+    printf("[LINE] fork-left: white wait expired, rearm for black\r\n");
+  }
+  return 0U;
+}
+
 static void LineTracker_EnterPivot(int8_t level)
 {
   /* 已经在转了，观察窗没意义了。 */
@@ -319,6 +407,61 @@ static void LineTracker_DrivePivot(void)
   {
     Car_DriveSpeed(v, (int16_t)(-v));   /* 向右原地转 */
   }
+}
+
+/**
+  * @brief  推进黑线暂停：全黑攒够周期就停 0.5s
+  * @param  pattern 本周期图案
+  * @param  now     当前 tick
+  * @retval 1=本周期应保持停止（调用方立即 return），0=照常循迹
+  */
+static uint8_t LineTracker_BlackPauseStep(uint8_t pattern, uint32_t now)
+{
+  /* 暂停进行中：停够就放行，并保持闩锁（离开黑区才会重新武装）。 */
+  if (line_black_pause_tick != 0U)
+  {
+    if ((uint32_t)(now - line_black_pause_tick) < LINE_BLACK_PAUSE_MS)
+    {
+      Car_Stop();
+      return 1U;
+    }
+    line_black_pause_tick = 0U;
+    line_black_count      = 0U;
+    printf("[LINE] black pause done, resume at base %u\r\n",
+           (unsigned)line_base_speed);
+    /* 不 return：本周期直接按当前图案继续循迹，不浪费一个周期。 */
+  }
+
+  if (pattern == LINE_PATTERN_ALL_BLACK)
+  {
+    if (line_black_count < 0xFFU)
+    {
+      line_black_count++;
+    }
+
+    if ((line_black_armed != 0U) &&
+        (line_black_count >= LINE_BLACK_PAUSE_COUNT))
+    {
+      /* 闩住：停完若仍在黑区上，不会立刻再停一次。 */
+      line_black_armed      = 0U;
+      line_black_pause_tick = (now != 0U) ? now : 1U;
+
+      /* 观察窗在暂停期间推不动，且停完车身姿态未变但节奏已断，直接作废，
+         免得恢复后拿着旧方向误判一次原地转。 */
+      LineTracker_EdgeWatchCancel();
+
+      Car_Stop();
+      printf("[LINE] all-black %u cycles, pause %u ms\r\n",
+             (unsigned)LINE_BLACK_PAUSE_COUNT, (unsigned)LINE_BLACK_PAUSE_MS);
+      return 1U;
+    }
+    return 0U;
+  }
+
+  /* 离开黑区：清计数并重新武装，下一片黑可以再停。 */
+  line_black_count = 0U;
+  line_black_armed = 1U;
+  return 0U;
 }
 
 /**
@@ -366,59 +509,6 @@ void LineTracker_Step(void)
 
   known = LineTracker_Decode(pattern, &level);
 
-  /* 把图案告知视觉导航（只读，不影响下面的循迹判断）。全黑在 ARMED 状态下
-     会开启视觉；0000/0001/1000 在 WAIT 状态下会构成旋转触发。 */
-  VisionNav_OnPattern(pattern);
-  VisionNav_Step();
-
-  /* ---- 视觉旋转进行中：推进定角动作，转完交回差速 ---- */
-  if (line_mode == LINE_MODE_VISION_TURN)
-  {
-    Car_ActionStatus st = Car_ActionStep();
-
-    if (st == CAR_ACTION_BUSY)
-    {
-      return;
-    }
-
-    /* DONE / TIMEOUT / FAILED 都算这次旋转结束（car 已制动）。把实测转角
-       报给 vision_nav 打印，供标定 VNAV_TURN_DEG10。 */
-    VisionNav_OnTurnDone(Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM) -
-                         line_turn_start_deg10);
-    if (st != CAR_ACTION_DONE)
-    {
-      printf("[LINE] vision turn ended abnormally (%d)\r\n", (int)st);
-    }
-    line_mode = LINE_MODE_DIFF;
-    return;
-  }
-
-  /* ---- 视觉导航要求旋转：让位给定角动作 ----
-     放在丢线判定之前：旋转触发图案里包含全黑，而全黑不参与丢线计数，
-     两者不冲突。 */
-  {
-    int32_t turn_deg10 = 0;
-
-    if ((line_mode != LINE_MODE_LOST) &&
-        (VisionNav_TakeTurnRequest(&turn_deg10) != 0U))
-    {
-      Car_ActionAbort();   /* 循迹用的是瞬时接口，这里确保没有残留动作 */
-      if (Car_StartRotateAngle(VNAV_TURN_SPEED, turn_deg10) == CAR_ACTION_BUSY)
-      {
-        line_turn_start_deg10 = Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM);
-        /* 视觉旋转期间 Step 会提前 return，观察窗推不动。转完车身姿态已经变了，
-           窗口的前提（正在跟线做微偏修正）不再成立，直接作废，免得旋转结束后
-           拿着旧方向误判一次原地转。 */
-        LineTracker_EdgeWatchCancel();
-        line_mode = LINE_MODE_VISION_TURN;
-        return;
-      }
-      /* 发起失败：告知 vision_nav 结束这一相，避免它卡在 RUN 状态。 */
-      printf("[LINE] vision turn rejected\r\n");
-      VisionNav_OnTurnDone(0);
-    }
-  }
-
   /* ---- 边缘观察窗：数全白，够多就把之前的"微偏"改判成原地转 ----
      必须放在全白判定**之前**：全白那一段会 return，放后面就永远数不到
      它要数的那个图案。只在 DIFF 模式下改判——已经在 pivot 里没必要重来，
@@ -436,9 +526,34 @@ void LineTracker_Step(void)
     }
   }
 
+  /* ---- 补给岔道规则：全黑 → 全白 → 原地左转 ----
+     必须放在紧接着的全黑/全白两段之前，那两段都会 return，
+     放后面就永远看不到它要等的图案。
+
+     也必须排在黑线暂停**之前**：暂停期间 Step 会提前 return，岔道规则推不动。
+     顺序反过来的话那次全黑会被暂停吃掉，岔道永远停在"等全黑"。 */
+  if (LineTracker_ForkStep(pattern, now) != 0U)
+  {
+    line_lost_count = 0U;      /* 岔道口的全白是预期的，不算丢线 */
+    LineTracker_EnterPivot(1); /* level>0 = 向左 */
+    LineTracker_DrivePivot();
+    return;
+  }
+
+  /* ---- 黑线暂停：全黑攒够 2 周期就停 0.5s，然后原速继续 ---- */
+  if (LineTracker_BlackPauseStep(pattern, now) != 0U)
+  {
+    line_lost_count = 0U;      /* 全黑不是丢线 */
+    return;
+  }
+
   /* ---- 全黑：不停车、不判丢线，维持上一周期轮速 ----
      Vision 赛道把全黑当作路口信号而不是异常。停在路口上视觉即使识别到了
      也没法继续走，所以这里保持原有状态继续前进。
+
+     注意这里的"不停车"与上面的黑线暂停不冲突：暂停是一次性的 0.5s，闩锁
+     保证同一片黑区只停一次，停完就落到这条路径上继续走。
+
      注意：这一段必须在"未定义图案 → 停车"之前，因为 0x00 在 Decode 里
      同样落 default。 */
   if (pattern == LINE_PATTERN_ALL_BLACK)

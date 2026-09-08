@@ -33,7 +33,7 @@ static uint8_t  indicator_blink_on;
   *
   * @note   **已知硬件差异**：左侧 RGB 的 R/G 两个引脚与 main.h 里的命名相反，
   *         所以申请 INDICATOR_RED 时左侧实际亮绿色、右侧正常亮红色。表现就是
-  *         避障/急停告警时"左绿右红"。
+  *         避障/急停呼唤时"左绿右红"。
   *
   *         原 RGB_SetColor() 是靠交叉传参掩盖这一点的（左侧 R 引脚喂 g 参数）。
   *         这里按引脚名直写，所以差异暴露出来了。属于接线问题，不是逻辑错误，
@@ -222,7 +222,7 @@ void Indicator_Step(void)
     show = indicator_blink_on;
   }
 
-  /* 蜂鸣不跟随闪烁相位：持续告警要一直响，点鸣按自己的节奏。 */
+  /* 蜂鸣不跟随闪烁相位：持续呼唤要一直响，点鸣按自己的节奏。 */
   Indicator_WriteBuzzer(Indicator_BuzzerNow(winner, now));
   Indicator_WriteLeft((show != 0U)  ? winner->left  : INDICATOR_OFF);
   Indicator_WriteRight((show != 0U) ? winner->right : INDICATOR_OFF);

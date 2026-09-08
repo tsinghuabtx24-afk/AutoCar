@@ -279,8 +279,8 @@ void AvoidTask_Begin(void)
   avoid_attempts   = 0U;
   avoid_reverses   = 0U;
 
-  /* 告警覆盖整个避障过程，结束时释放。左右侧红灯指示受阻方向。 */
-  /* 告警覆盖整个避障过程。蜂鸣持续——避障时车在动，需要持续提醒周围的人。 */
+  /* 呼唤覆盖整个避障过程，结束时释放。左右侧红灯指示受阻方向。 */
+  /* 呼唤覆盖整个避障过程。蜂鸣持续——避障时车在动，需要持续提醒周围的人。 */
   Indicator_Request(INDICATOR_PRIO_AVOID, INDICATOR_BUZZER_ON,
                     (IrAvoid_IsLeftBlocked()  != 0U) ? INDICATOR_RED : INDICATOR_OFF,
                     (IrAvoid_IsRightBlocked() != 0U) ? INDICATOR_RED : INDICATOR_OFF,
@@ -319,6 +319,31 @@ void AvoidTask_Begin(void)
 #endif
 
   AvoidTask_StartAttempt();
+}
+
+void AvoidTask_BeginDetour(int8_t mirror)
+{
+  Car_ActionAbort();
+  avoid_start_tick = HAL_GetTick();
+  avoid_attempts   = 0U;
+  avoid_reverses   = 0U;
+  avoid_step       = 0U;
+
+  /* 方向由调用方给定，不查传感器——视觉触发时传感器通常还没报警。 */
+  avoid_detour_mirror = (mirror < 0) ? -1 : 1;
+
+  Indicator_Request(INDICATOR_PRIO_AVOID, INDICATOR_BUZZER_ON,
+                    INDICATOR_RED, INDICATOR_RED, INDICATOR_BLINK_FAST_MS);
+
+  printf("[AVOID] vision detour %s (sensors bypassed)\r\n",
+         (avoid_detour_mirror > 0) ? "RIGHT" : "LEFT");
+
+  if (AvoidTask_StartDetourStep(0U) == 0U)
+  {
+    avoid_state = AVOID_FAILED;
+    return;
+  }
+  AvoidTask_EnterPhase(AVOID_DETOUR);
 }
 
 void AvoidTask_Cancel(void)

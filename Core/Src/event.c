@@ -97,30 +97,29 @@ const char *Event_TypeName(Event_Type type)
 {
   switch (type)
   {
-    case EVENT_VISION_SPEED_LIMIT:    return "VISION_SPEED_LIMIT";
-    case EVENT_VISION_SPEED_RELEASE:  return "VISION_SPEED_RELEASE";
-    case EVENT_VISION_TURN_LEFT:      return "VISION_TURN_LEFT";
-    case EVENT_VISION_TURN_RIGHT:     return "VISION_TURN_RIGHT";
-    case EVENT_VISION_HORN:           return "VISION_HORN";
-    case EVENT_VISION_PARK_1:         return "VISION_PARK_1";
-    case EVENT_VISION_PARK_2:         return "VISION_PARK_2";
-    case EVENT_VISION_TUNNEL:         return "VISION_TUNNEL";
-    case EVENT_VISION_ROUGH_ROAD:     return "VISION_ROUGH_ROAD";
-    case EVENT_VISION_FRIENDLY:       return "VISION_FRIENDLY";
-    case EVENT_OBSTACLE_LEFT:         return "OBSTACLE_LEFT";
-    case EVENT_OBSTACLE_RIGHT:        return "OBSTACLE_RIGHT";
-    case EVENT_OBSTACLE_BOTH:         return "OBSTACLE_BOTH";
-    case EVENT_OBSTACLE_FRONT:        return "OBSTACLE_FRONT";
-    case EVENT_OBSTACLE_CLEAR:        return "OBSTACLE_CLEAR";
-    case EVENT_KEY_START:             return "KEY_START";
-    case EVENT_KEY_STOP:              return "KEY_STOP";
-    case EVENT_REMOTE_MANUAL_TOGGLE:  return "REMOTE_MANUAL_TOGGLE";
-    case EVENT_REMOTE_FORWARD:        return "REMOTE_FORWARD";
-    case EVENT_REMOTE_BACKWARD:       return "REMOTE_BACKWARD";
-    case EVENT_REMOTE_ROTATE_LEFT:    return "REMOTE_ROTATE_LEFT";
-    case EVENT_REMOTE_ROTATE_RIGHT:   return "REMOTE_ROTATE_RIGHT";
-    case EVENT_REMOTE_HORN:           return "REMOTE_HORN";
-    case EVENT_FAULT:                 return "FAULT";
-    default:                          return "NONE";
+    case EVENT_VISION_TUNNEL:             return "VISION_TUNNEL";
+    case EVENT_VISION_NO_ENTRY:           return "VISION_NO_ENTRY";
+    case EVENT_VISION_FRIENDLY:           return "VISION_FRIENDLY";
+    case EVENT_VISION_WAREHOUSE:          return "VISION_WAREHOUSE";
+    case EVENT_VISION_SLOW_AHEAD:         return "VISION_SLOW_AHEAD";
+    case EVENT_VISION_NARROW_STREET: return "VISION_NARROW_STREET";
+    case EVENT_VISION_COLLAPSED_HOUSE: return "VISION_COLLAPSED_HOUSE";
+    case EVENT_OBSTACLE_LEFT:             return "OBSTACLE_LEFT";
+    case EVENT_OBSTACLE_RIGHT:            return "OBSTACLE_RIGHT";
+    case EVENT_OBSTACLE_BOTH:             return "OBSTACLE_BOTH";
+    case EVENT_OBSTACLE_FRONT:            return "OBSTACLE_FRONT";
+    case EVENT_OBSTACLE_CLEAR:            return "OBSTACLE_CLEAR";
+    case EVENT_KEY_START:                 return "KEY_START";
+    case EVENT_KEY_STOP:                  return "KEY_STOP";
+    case EVENT_REMOTE_MANUAL_TOGGLE:      return "REMOTE_MANUAL_TOGGLE";
+    case EVENT_REMOTE_FORWARD:            return "REMOTE_FORWARD";
+    case EVENT_REMOTE_BACKWARD:           return "REMOTE_BACKWARD";
+    case EVENT_REMOTE_ROTATE_LEFT:        return "REMOTE_ROTATE_LEFT";
+    case EVENT_REMOTE_ROTATE_RIGHT:       return "REMOTE_ROTATE_RIGHT";
+    case EVENT_REMOTE_HORN:               return "REMOTE_HORN";
+    case EVENT_REMOTE_CALL_ALLY:         return "REMOTE_CALL_ALLY";
+    case EVENT_REMOTE_TURN_AROUND:        return "REMOTE_TURN_AROUND";
+    case EVENT_FAULT:                     return "FAULT";
+    default:                              return "NONE";
   }
 }

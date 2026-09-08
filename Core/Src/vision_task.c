@@ -6,15 +6,11 @@
 
 #include <stdio.h>
 
-/* 限速后的速度必须仍高于死区，否则限速等于停车。 */
 _Static_assert(VISION_SPEED_NORMAL > VISION_SPEED_LIMIT_DROP,
                "VISION_SPEED_LIMIT_DROP exceeds VISION_SPEED_NORMAL");
 _Static_assert((VISION_SPEED_NORMAL - VISION_SPEED_LIMIT_DROP) >
                (CAR_SPEED_BASE + 2U),
                "limited speed falls into the motor dead zone");
-
-/* 解除限速要恢复到循迹的默认速度，两个宏必须一致，否则一次限速+解除之后
-   车速会悄悄变成另一个值。 */
 _Static_assert(VISION_SPEED_NORMAL == LINE_BASE_SPEED,
                "VISION_SPEED_NORMAL must match LINE_BASE_SPEED");
 
@@ -24,18 +20,30 @@ static uint32_t task_phase_tick;
 static uint8_t task_phase;
 static uint8_t task_speed;
 
-/* 当前的灯与蜂鸣申请状态。通过指示层申请而不是直写 GPIO，这样入库闪灯
-   不会再被红外的"无障碍则灭灯"覆盖。 */
 static uint8_t task_alert_on;
 static uint8_t task_buzzer_on;
 
-/* ---- 信号类动作的独立状态 ----
-   这三个与底盘任务并行，各自一套计时，互不排斥：过隧道时遇到起伏路段，
-   白灯和限速应该同时生效。0 = 未激活。 */
-static uint32_t signal_tunnel_until;    /* 白灯到期 tick，0=不亮 */
-static uint32_t signal_rough_until;     /* 限速到期 tick，0=不限速 */
-static uint32_t signal_flash_until;     /* 友军短闪到期 tick，0=不闪 */
-static uint8_t  signal_light_shown;     /* 当前是否已向指示层申请信号灯 */
+/* 信号类动作的独立状态 */
+static uint32_t signal_tunnel_until;
+static uint32_t signal_slow_until;
+static uint32_t signal_flash_until;
+static uint32_t signal_narrow_until;   /* 狭窄街道黄闪的截止时刻 */
+
+/* 友军旋律两遍之间的静音间隔起点。0 = 不在间隔中。 */
+static uint32_t friendly_gap_tick;
+static uint8_t  signal_light_shown;
+
+/* 仓库任务专用状态 */
+static uint8_t  warehouse_zero_count;
+static uint8_t  warehouse_phase;
+static uint32_t warehouse_sample_tick;   /* 上次全白采样时刻 */
+static uint32_t warehouse_fwd_ms;        /* 直行段实测时长 x，回程照此走 */
+
+/* 呼唤友军状态。call_ally_used 是一次性闩锁，只有 Init() 清零，
+   所以 Cancel()/急停都不会让它恢复可用——符合"除 reset 不再收第二次"。 */
+static uint8_t  call_ally_active;
+static uint8_t  call_ally_used;
+static uint32_t call_ally_start_tick;
 
 static void VisionTask_Apply(void)
 {
@@ -45,10 +53,6 @@ static void VisionTask_Apply(void)
     return;
   }
 
-  /* 闪灯相位由任务自己按 task_phase 控制，所以这里 blink_ms 传 0（常亮），
-     由 task_alert_on 的开关体现闪烁。 */
-  /* 鸣笛任务自己控制"响几声"的相位，所以这里用持续鸣叫，
-     由 task_buzzer_on 的开关体现节奏。 */
   Indicator_Request(INDICATOR_PRIO_TASK,
                     (task_buzzer_on != 0U) ? INDICATOR_BUZZER_ON
                                            : INDICATOR_BUZZER_OFF,
@@ -70,21 +74,72 @@ static void VisionTask_Buzzer(uint8_t on)
 }
 
 /**
-  * @brief  把信号类灯效落到指示层
-  * @note   友军短闪优先于隧道白灯：两者同时激活时先给短闪，几百毫秒后
-  *         自然回到白灯。都不激活才撤销申请，避免抢掉别的模块的灯。
+  * @brief  呼唤友军的灯笛输出。走 PRIO_CALL_ALLY，压得住手动模式的蓝灯。
+  * @param  on 1=亮灯并鸣笛，0=熄灭并静音
   */
+static void VisionTask_CallAllyApply(uint8_t on)
+{
+  Indicator_Request(INDICATOR_PRIO_CALL_ALLY,
+                    (on != 0U) ? INDICATOR_BUZZER_ON : INDICATOR_BUZZER_OFF,
+                    (on != 0U) ? INDICATOR_YELLOW : INDICATOR_OFF,
+                    (on != 0U) ? INDICATOR_YELLOW : INDICATOR_OFF,
+                    0U);
+}
+
+/**
+  * @brief  呼唤图案：两次短闪 + 短暂熄灭，循环
+  * @param  elapsed 距呼唤开始的毫秒数
+  * @retval 1=此刻应亮，0=此刻应灭
+  */
+static uint8_t VisionTask_CallAllyPhaseOn(uint32_t elapsed)
+{
+  uint32_t t = elapsed % VISION_CALL_ALLY_CYCLE_MS;
+
+  /* 第一闪 */
+  if (t < VISION_CALL_ALLY_ON_MS)
+  {
+    return 1U;
+  }
+  t -= VISION_CALL_ALLY_ON_MS;
+
+  /* 两闪之间的熄灭 */
+  if (t < VISION_CALL_ALLY_GAP_MS)
+  {
+    return 0U;
+  }
+  t -= VISION_CALL_ALLY_GAP_MS;
+
+  /* 第二闪 */
+  if (t < VISION_CALL_ALLY_ON_MS)
+  {
+    return 1U;
+  }
+
+  /* 剩下的就是一组之后的短暂熄灭 */
+  return 0U;
+}
+
 static void VisionTask_SignalLightApply(void)
 {
   Indicator_Color color;
+  uint16_t blink_ms;
 
+  /* 三个信号灯效共用 PRIO_SIGNAL 这一个槽，同时成立时按下面的顺序取一个。
+     友军闪白排在最前：它伴随停车，是当下最该看见的状态。 */
   if (signal_flash_until != 0U)
   {
-    color = INDICATOR_WHITE;
+    color    = INDICATOR_WHITE;
+    blink_ms = 0U;
+  }
+  else if (signal_narrow_until != 0U)
+  {
+    color    = INDICATOR_YELLOW;
+    blink_ms = INDICATOR_BLINK_FAST_MS;
   }
   else if (signal_tunnel_until != 0U)
   {
-    color = INDICATOR_WHITE;
+    color    = INDICATOR_WHITE;
+    blink_ms = 0U;
   }
   else
   {
@@ -96,16 +151,14 @@ static void VisionTask_SignalLightApply(void)
     return;
   }
 
-  /* 蜂鸣交给 buzzer_tone 直接驱动引脚，这里只申请灯，blink_ms=0 即常亮。 */
   Indicator_Request(INDICATOR_PRIO_SIGNAL, INDICATOR_BUZZER_OFF,
-                    color, color, 0U);
+                    color, color, blink_ms);
   signal_light_shown = 1U;
 }
 
-/* 起伏路段限速期间的巡线速度。 */
 static uint8_t VisionTask_SpeedForSignals(void)
 {
-  if (signal_rough_until != 0U)
+  if (signal_slow_until != 0U)
   {
     return (uint8_t)(VISION_SPEED_NORMAL - VISION_SPEED_LIMIT_DROP);
   }
@@ -116,7 +169,6 @@ void VisionTask_Tick(void)
 {
   uint32_t now = HAL_GetTick();
 
-  /* 到期判断用有符号差值：tick 回绕时仍然正确。 */
   if ((signal_tunnel_until != 0U) &&
       ((int32_t)(now - signal_tunnel_until) >= 0))
   {
@@ -130,22 +182,49 @@ void VisionTask_Tick(void)
     signal_flash_until = 0U;
   }
 
-  if ((signal_rough_until != 0U) &&
-      ((int32_t)(now - signal_rough_until) >= 0))
+  if ((signal_narrow_until != 0U) &&
+      ((int32_t)(now - signal_narrow_until) >= 0))
   {
-    signal_rough_until = 0U;
+    signal_narrow_until = 0U;
+    printf("[VTASK] narrow street blink off\r\n");
+  }
+
+  if ((signal_slow_until != 0U) &&
+      ((int32_t)(now - signal_slow_until) >= 0))
+  {
+    signal_slow_until = 0U;
     task_speed = VISION_SPEED_NORMAL;
     LineTracker_SetBaseSpeed(task_speed);
-    printf("[VTASK] rough road passed, speed restored to %u\r\n",
+    printf("[VTASK] slow-ahead passed, speed restored to %u\r\n",
            (unsigned)task_speed);
   }
 
   VisionTask_SignalLightApply();
   BuzzerTone_Step();
+
+  /* 呼唤友军：两短闪循环，8s 到点自动收尾。
+     注意 call_ally_used 不在这里清——用过就是用过。 */
+  if (call_ally_active != 0U)
+  {
+    uint32_t elapsed = (uint32_t)(now - call_ally_start_tick);
+
+    if (elapsed >= VISION_CALL_ALLY_DURATION_MS)
+    {
+      call_ally_active = 0U;
+      Indicator_Release(INDICATOR_PRIO_CALL_ALLY);
+      if (task_state == VISION_TASK_CALL_ALLY)
+      {
+        task_state = VISION_TASK_IDLE;
+        printf("[VTASK] horn alarm finished\r\n");
+      }
+    }
+    else
+    {
+      VisionTask_CallAllyApply(VisionTask_CallAllyPhaseOn(elapsed));
+    }
+  }
 }
 
-/* 内部启动一个任务。公开的 VisionTask_Begin(Event_Type) 是调度器入口，
-   两者名字容易混，这个改叫 Start。 */
 static void VisionTask_Start(VisionTask_State state)
 {
   task_state = state;
@@ -161,6 +240,8 @@ static void VisionTask_Finish(void)
   VisionTask_Buzzer(0U);
   task_state = VISION_TASK_IDLE;
   task_phase = 0U;
+  warehouse_zero_count = 0U;
+  warehouse_phase = 0U;
   printf("[VTASK] done, speed=%u\r\n", (unsigned)task_speed);
 }
 
@@ -172,12 +253,21 @@ void VisionTask_Init(void)
   task_phase = 0U;
   task_speed = VISION_SPEED_NORMAL;
   signal_tunnel_until = 0U;
-  signal_rough_until = 0U;
+  signal_slow_until = 0U;
   signal_flash_until = 0U;
+  signal_narrow_until = 0U;
+  friendly_gap_tick = 0U;
   signal_light_shown = 0U;
+  warehouse_zero_count = 0U;
+  warehouse_phase = 0U;
+  warehouse_sample_tick = 0U;
+  warehouse_fwd_ms = 0U;
+  call_ally_active = 0U;
+  call_ally_used = 0U;      /* 唯一的闩锁清零点：仅上电/复位 */
   VisionTask_Alert(0U);
   VisionTask_Buzzer(0U);
   Indicator_Release(INDICATOR_PRIO_SIGNAL);
+  Indicator_Release(INDICATOR_PRIO_CALL_ALLY);
 }
 
 uint8_t VisionTask_GetSpeed(void) { return task_speed; }
@@ -187,101 +277,83 @@ const char *VisionTask_StateName(VisionTask_State state)
 {
   switch (state)
   {
-    case VISION_TASK_TURN_LEFT: return "TURN_LEFT";
-    case VISION_TASK_TURN_RIGHT: return "TURN_RIGHT";
-    case VISION_TASK_HORN: return "HORN";
-    case VISION_TASK_PARK_1: return "PARK_1";
-    case VISION_TASK_PARK_2: return "PARK_2";
-    case VISION_TASK_STOPPED: return "STOPPED";
-    default: return "IDLE";
+    case VISION_TASK_STOPPED:           return "STOPPED";
+    case VISION_TASK_FRIENDLY:          return "FRIENDLY";
+    case VISION_TASK_NO_ENTRY:          return "NO_ENTRY";
+    case VISION_TASK_WAREHOUSE:         return "WAREHOUSE";
+    case VISION_TASK_CALL_ALLY:        return "CALL_ALLY";
+    case VISION_TASK_TURN_AROUND:      return "TURN_AROUND";
+    default:                            return "IDLE";
   }
 }
 
-/**
-  * @brief  按事件创建任务（调度器入口）
-  * @retval 1=起了占用底盘的任务，0=只改配置或被忽略
-  *
-  * @note   限速/解除限速是持续配置，只改巡线速度，不创建任务也不抢占底盘。
-  *
-  * @note   任务运行中不接收新任务事件，避免反复重启动作。VISION_TASK_STOPPED
-  *         （1 号库停稳后）允许接受新任务：设计意图是"停在库里直到识别到新的
-  *         视觉任务"。
-  */
 uint8_t VisionTask_Begin(Event_Type type)
 {
-  /* 可以起新任务的状态：空闲，或 1 号库停稳后的停止态。 */
   uint8_t acceptable = (uint8_t)((task_state == VISION_TASK_IDLE) ||
                                  (task_state == VISION_TASK_STOPPED));
 
   switch (type)
   {
-    case EVENT_VISION_SPEED_LIMIT:
-      /* 限速：在正常速度基础上降低固定占空比。
-         下限保护交给 LineTracker_SetBaseSpeed()——那里才知道死区和差速需要
-         多少余量，在这里判 0 反而会算出一个电机根本不转的值。 */
-      task_speed = (uint8_t)(VISION_SPEED_NORMAL - VISION_SPEED_LIMIT_DROP);
-      printf("[VTASK] speed limited to %u\r\n", (unsigned)task_speed);
-      return 0U;
-
-    case EVENT_VISION_SPEED_RELEASE:
-      /* 解除限速：恢复正常巡线速度。 */
-      task_speed = VISION_SPEED_NORMAL;
-      printf("[VTASK] speed restored to %u\r\n", (unsigned)task_speed);
-      return 0U;
-
+    /* ==== 信号类（不占底盘） ==== */
     case EVENT_VISION_TUNNEL:
-      /* 隧道：常亮白灯 5s 后关闭。车照常循迹，不抢底盘。
-         重复识别到同一隧道就顺延 5s，不会来回开关。 */
       signal_tunnel_until = HAL_GetTick() + VISION_TUNNEL_LIGHT_MS;
-      if (signal_tunnel_until == 0U) signal_tunnel_until = 1U;  /* 0 是"未激活" */
+      if (signal_tunnel_until == 0U) signal_tunnel_until = 1U;
       VisionTask_SignalLightApply();
       printf("[VTASK] tunnel: white light %u ms\r\n",
              (unsigned)VISION_TUNNEL_LIGHT_MS);
       return 0U;
 
-    case EVENT_VISION_ROUGH_ROAD:
-      /* 起伏路段：减速通过 5s 后恢复原速。同样不抢底盘，只改巡线速度。
-         调用方（scheduler）在返回 0 后会同步 VisionTask_GetSpeed()。 */
-      signal_rough_until = HAL_GetTick() + VISION_ROUGH_SLOW_MS;
-      if (signal_rough_until == 0U) signal_rough_until = 1U;
+    case EVENT_VISION_SLOW_AHEAD:
+      signal_slow_until = HAL_GetTick() + VISION_SLOW_AHEAD_MS;
+      if (signal_slow_until == 0U) signal_slow_until = 1U;
       task_speed = VisionTask_SpeedForSignals();
-      printf("[VTASK] rough road: speed %u for %u ms\r\n",
-             (unsigned)task_speed, (unsigned)VISION_ROUGH_SLOW_MS);
+      printf("[VTASK] slow ahead: speed %u for %u ms\r\n",
+             (unsigned)task_speed, (unsigned)VISION_SLOW_AHEAD_MS);
       return 0U;
 
+    /* ==== 狭窄街道：黄灯闪烁 2s（不占底盘，仅指示） ==== */
+    case EVENT_VISION_NARROW_STREET:
+      signal_narrow_until = HAL_GetTick() + VISION_NARROW_BLINK_MS;
+      if (signal_narrow_until == 0U) signal_narrow_until = 1U;
+      VisionTask_SignalLightApply();
+      printf("[VTASK] narrow street: yellow blink %u ms\r\n",
+             (unsigned)VISION_NARROW_BLINK_MS);
+      return 0U;
+
+    /* ==== 友军信号：停车鸣笛，放完原速启动（占底盘） ==== */
     case EVENT_VISION_FRIENDLY:
-      /* 友军：短闪一次 + 一段有音调的旋律，表示"识别到友军，安全"。
-         不停车、不抢底盘。 */
-      signal_flash_until = HAL_GetTick() + VISION_FRIENDLY_FLASH_MS;
+      if (acceptable == 0U) return 0U;
+      VisionTask_Start(VISION_TASK_FRIENDLY);
+      friendly_gap_tick = 0U;   /* task_phase 由 Start() 清零，用作遍数计数 */
+      /* 闪白灯覆盖整个停车段，配合旋律；由 RunFriendly 结束时清掉。 */
+      signal_flash_until = HAL_GetTick() + VISION_FRIENDLY_TIMEOUT_MS;
       if (signal_flash_until == 0U) signal_flash_until = 1U;
       VisionTask_SignalLightApply();
       BuzzerTone_Play(BUZZER_MELODY_FRIENDLY, BUZZER_MELODY_FRIENDLY_LEN);
-      printf("[VTASK] friendly: flash + melody\r\n");
+      printf("[VTASK] friendly: stop + melody\r\n");
+      return 1U;
+
+    /* ==== 倒塌房屋：走避障绕行 ====
+       这里不做事，也不投 EVENT_OBSTACLE_FRONT。原来投假的传感器事件走不通：
+       AvoidTask_Begin() 要靠传感器读数选绕行方向，读到"无障碍"就当场放弃，
+       车一步都不动。改由 scheduler 直接调 AvoidTask_BeginDetour()。 */
+    case EVENT_VISION_COLLAPSED_HOUSE:
       return 0U;
 
-    case EVENT_VISION_TURN_LEFT:
+    /* ==== 禁止通行：倒车→右转→前进 ==== */
+    case EVENT_VISION_NO_ENTRY:
       if (acceptable == 0U) return 0U;
-      VisionTask_Start(VISION_TASK_TURN_LEFT);
+      VisionTask_Start(VISION_TASK_NO_ENTRY);
       return 1U;
 
-    case EVENT_VISION_TURN_RIGHT:
+    /* ==== 仓库 ==== */
+    case EVENT_VISION_WAREHOUSE:
       if (acceptable == 0U) return 0U;
-      VisionTask_Start(VISION_TASK_TURN_RIGHT);
-      return 1U;
-
-    case EVENT_VISION_HORN:
-      if (acceptable == 0U) return 0U;
-      VisionTask_Start(VISION_TASK_HORN);
-      return 1U;
-
-    case EVENT_VISION_PARK_1:
-      if (acceptable == 0U) return 0U;
-      VisionTask_Start(VISION_TASK_PARK_1);
-      return 1U;
-
-    case EVENT_VISION_PARK_2:
-      if (acceptable == 0U) return 0U;
-      VisionTask_Start(VISION_TASK_PARK_2);
+      warehouse_zero_count = 0U;
+      warehouse_phase = 0U;
+      warehouse_fwd_ms = 0U;
+      warehouse_sample_tick = HAL_GetTick();
+      VisionTask_Start(VISION_TASK_WAREHOUSE);
       return 1U;
 
     default:
@@ -290,120 +362,353 @@ uint8_t VisionTask_Begin(Event_Type type)
 }
 
 /**
-  * @brief  鸣笛任务：响 0.5s、停 0.2s，共两声，期间停车
+  * @brief  友军信号：停住把旋律放四遍，然后原速启动
+  *
+  * @note   "原速"不需要在这里恢复：本任务全程不碰 task_speed / 基础速度，
+  *         结束后调度器切回 CONTROL_LINE_TRACK，循迹沿用原来的基础速度。
+  *         若此前正处于前方慢行的限速窗内，限速也照样保持——那是另一条
+  *         独立的时间窗，不该被友军信号顺手清掉。
+  *
+  * @note   task_phase 用作已放遍数计数，friendly_gap_tick 记间隔起点。
   */
-static void VisionTask_RunHorn(void)
+static void VisionTask_RunFriendly(void)
 {
-  uint32_t now = HAL_GetTick();
-  uint32_t elapsed = (uint32_t)(now - task_phase_tick);
-  uint8_t beeping = (uint8_t)((task_phase % 2U) == 0U);
-  uint32_t limit = (beeping != 0U) ? VISION_HORN_ON_MS : VISION_HORN_GAP_MS;
+  uint32_t now     = HAL_GetTick();
+  uint32_t elapsed = (uint32_t)(now - task_start_tick);
 
   Car_Stop();
-  VisionTask_Buzzer(beeping);
 
-  if (elapsed < limit)
+  /* 兜底：蜂鸣器被 suspend 或旋律异常时别把车永远停在这。 */
+  if (elapsed >= VISION_FRIENDLY_TIMEOUT_MS)
+  {
+    printf("[VTASK] friendly: melody timeout at loop %u/%u\r\n",
+           (unsigned)task_phase, (unsigned)VISION_FRIENDLY_LOOPS);
+    BuzzerTone_Stop();
+    signal_flash_until = 0U;
+    VisionTask_SignalLightApply();
+    VisionTask_Finish();
+    return;
+  }
+
+  /* 本遍还在响：等它放完。BuzzerTone_Step() 由 VisionTask_Tick() 推进。 */
+  if (BuzzerTone_IsPlaying() != 0U)
+  {
+    friendly_gap_tick = 0U;
+    return;
+  }
+
+  /* 本遍刚放完，开始记间隔。 */
+  if (friendly_gap_tick == 0U)
+  {
+    friendly_gap_tick = now;
+    return;
+  }
+
+  /* 间隔没走完，继续静音等着。 */
+  if ((uint32_t)(now - friendly_gap_tick) < VISION_FRIENDLY_LOOP_GAP_MS)
   {
     return;
   }
 
-  task_phase++;
-  task_phase_tick = now;
-
-  /* 每声占用「响 + 停」两个阶段。 */
-  if (task_phase >= (uint8_t)(VISION_HORN_COUNT * 2U))
+  /* 起下一遍，或者四遍放满就收工。 */
+  if (task_phase < (uint8_t)(VISION_FRIENDLY_LOOPS - 1U))
   {
-    VisionTask_Finish();
+    task_phase++;
+    friendly_gap_tick = 0U;
+    BuzzerTone_Play(BUZZER_MELODY_FRIENDLY, BUZZER_MELODY_FRIENDLY_LEN);
+    printf("[VTASK] friendly: melody loop %u/%u\r\n",
+           (unsigned)(task_phase + 1U), (unsigned)VISION_FRIENDLY_LOOPS);
+    return;
   }
+
+  /* 白灯窗口跟着一起收，别让它挂到 TIMEOUT 才灭。 */
+  signal_flash_until = 0U;
+  VisionTask_SignalLightApply();
+
+  printf("[VTASK] friendly: %u loops done, resume at speed %u\r\n",
+         (unsigned)VISION_FRIENDLY_LOOPS, (unsigned)task_speed);
+  VisionTask_Finish();
 }
 
-/**
-  * @brief  闪灯，返回 1 表示闪灯阶段仍在进行
-  */
-static uint8_t VisionTask_RunBlink(void)
+static void VisionTask_RunNoEntry(void)
 {
   uint32_t now = HAL_GetTick();
 
-  if ((uint32_t)(now - task_start_tick) >= VISION_PARK_BLINK_TOTAL_MS)
+  switch (task_phase)
   {
-    VisionTask_Alert(0U);
+    case 0U:  /* 倒车 */
+      Car_Backward(VISION_SPEED_NORMAL, VISION_NO_ENTRY_BACK_MS);
+      if ((uint32_t)(now - task_start_tick) >= VISION_NO_ENTRY_BACK_MS)
+      {
+        task_phase = 1U;
+        task_phase_tick = now;
+        Car_Stop();
+        printf("[VTASK] no_entry: back done, turning right\r\n");
+      }
+      break;
+
+    case 1U:  /* 右转90° */
+      if (Car_StartRotateAngle(VISION_TURN_SPEED, -(int32_t)VISION_TURN_ANGLE_DEG10) 
+          != CAR_ACTION_BUSY)
+      {
+        printf("[VTASK] no_entry: turn rejected\r\n");
+        VisionTask_Finish();
+        return;
+      }
+      task_phase = 2U;
+      break;
+
+    case 2U:  /* 等待右转完成 */
+      switch (Car_ActionStep())
+      {
+        case CAR_ACTION_BUSY:
+          break;
+        case CAR_ACTION_DONE:
+          task_phase = 3U;
+          task_phase_tick = now;
+          printf("[VTASK] no_entry: turn done, moving forward\r\n");
+          break;
+        default:
+          printf("[VTASK] no_entry: turn failed\r\n");
+          VisionTask_Finish();
+          break;
+      }
+      break;
+
+    case 3U:  /* 前进 */
+      Car_ForwardRun(VISION_SPEED_NORMAL);
+      if ((uint32_t)(now - task_phase_tick) >= VISION_NO_ENTRY_FWD_MS)
+      {
+        VisionTask_Finish();
+        printf("[VTASK] no_entry: all done\r\n");
+      }
+      break;
+
+    default:
+      VisionTask_Finish();
+      break;
+  }
+}
+
+static void VisionTask_RunWarehouse(void)
+{
+  uint32_t now = HAL_GetTick();
+  uint8_t pattern;
+
+  switch (warehouse_phase)
+  {
+    case 0U:  /* 左转90° */
+      if (Car_StartRotateAngle(VISION_TURN_SPEED, (int32_t)VISION_TURN_ANGLE_DEG10)
+          != CAR_ACTION_BUSY)
+      {
+        printf("[VTASK] warehouse: turn left rejected\r\n");
+        VisionTask_Finish();
+        return;
+      }
+      warehouse_phase = 1U;
+      warehouse_zero_count = 0U;
+      break;
+
+    case 1U:  /* 等待左转完成 */
+      switch (Car_ActionStep())
+      {
+        case CAR_ACTION_BUSY:
+          break;
+        case CAR_ACTION_DONE:
+          warehouse_phase = 2U;
+          warehouse_zero_count = 0U;
+          /* 直行段从这一刻起计时，这段时长就是 x。 */
+          task_phase_tick = now;
+          warehouse_sample_tick = now;
+          printf("[VTASK] warehouse: left turn done, going straight\r\n");
+          break;
+        default:
+          printf("[VTASK] warehouse: left turn failed\r\n");
+          VisionTask_Finish();
+          break;
+      }
+      break;
+
+    case 2U:  /* 直行，直到连续 8 个采样周期读到 0000 */
+      Car_ForwardRun(VISION_SPEED_NORMAL);
+
+      /* 按固定节拍采样。Step() 每轮都进来，不限速的话 8 次只有零点几毫秒。 */
+      if ((uint32_t)(now - warehouse_sample_tick) >= VISION_WAREHOUSE_SAMPLE_MS)
+      {
+        warehouse_sample_tick = now;
+        pattern = LineTracker_ReadPattern();
+
+        if (pattern == 0x00U)
+        {
+          warehouse_zero_count++;
+        }
+        else
+        {
+          warehouse_zero_count = 0U;
+        }
+      }
+
+      /* 到位，或者走太久了兜底收手。两种情况都把已走时长记为 x。 */
+      if ((warehouse_zero_count >= VISION_WAREHOUSE_ZERO_COUNT) ||
+          ((uint32_t)(now - task_phase_tick) >= VISION_WAREHOUSE_FWD_MAX_MS))
+      {
+        warehouse_fwd_ms = (uint32_t)(now - task_phase_tick);
+        if (warehouse_fwd_ms > VISION_WAREHOUSE_FWD_MAX_MS)
+        {
+          warehouse_fwd_ms = VISION_WAREHOUSE_FWD_MAX_MS;
+        }
+
+        if (warehouse_zero_count < VISION_WAREHOUSE_ZERO_COUNT)
+        {
+          printf("[VTASK] warehouse: straight timeout, x=%u ms\r\n",
+                 (unsigned)warehouse_fwd_ms);
+        }
+        else
+        {
+          printf("[VTASK] warehouse: %u zero samples, x=%u ms, stopping\r\n",
+                 (unsigned)VISION_WAREHOUSE_ZERO_COUNT,
+                 (unsigned)warehouse_fwd_ms);
+        }
+
+        warehouse_phase = 3U;
+        warehouse_zero_count = 0U;
+        Car_Stop();
+        task_phase_tick = now;
+      }
+      break;
+
+    case 3U:  /* 停止3s */
+      Car_Stop();
+      if ((uint32_t)(now - task_phase_tick) >= VISION_WAREHOUSE_STOP_MS)
+      {
+        warehouse_phase = 4U;
+        printf("[VTASK] warehouse: stop done, rotating 180\r\n");
+      }
+      break;
+
+    case 4U:  /* 原地旋转180° */
+      if (Car_StartRotateAngle(VISION_TURN_SPEED, 1800) != CAR_ACTION_BUSY)
+      {
+        printf("[VTASK] warehouse: 180 turn rejected\r\n");
+        VisionTask_Finish();
+        return;
+      }
+      warehouse_phase = 5U;
+      break;
+
+    case 5U:  /* 等待180°完成 */
+      switch (Car_ActionStep())
+      {
+        case CAR_ACTION_BUSY:
+          break;
+        case CAR_ACTION_DONE:
+          warehouse_phase = 6U;
+          task_phase_tick = now;
+          printf("[VTASK] warehouse: 180 done, going forward\r\n");
+          break;
+        default:
+          printf("[VTASK] warehouse: 180 failed\r\n");
+          VisionTask_Finish();
+          break;
+      }
+      break;
+
+    case 6U:  /* 前进距离 x：与进库直行段等时长，回到进库前的位置 */
+      Car_ForwardRun(VISION_SPEED_NORMAL);
+      if ((uint32_t)(now - task_phase_tick) >= warehouse_fwd_ms)
+      {
+        warehouse_phase = 7U;
+        Car_Stop();
+        printf("[VTASK] warehouse: forward x=%u ms done, turning right\r\n",
+               (unsigned)warehouse_fwd_ms);
+      }
+      break;
+
+    case 7U:  /* 右转90° */
+      if (Car_StartRotateAngle(VISION_TURN_SPEED, -(int32_t)VISION_TURN_ANGLE_DEG10)
+          != CAR_ACTION_BUSY)
+      {
+        printf("[VTASK] warehouse: right turn rejected\r\n");
+        VisionTask_Finish();
+        return;
+      }
+      warehouse_phase = 8U;
+      break;
+
+    case 8U:  /* 等待右转完成 */
+      switch (Car_ActionStep())
+      {
+        case CAR_ACTION_BUSY:
+          break;
+        case CAR_ACTION_DONE:
+          printf("[VTASK] warehouse: all done\r\n");
+          VisionTask_Finish();
+          break;
+        default:
+          printf("[VTASK] warehouse: right turn failed\r\n");
+          VisionTask_Finish();
+          break;
+      }
+      break;
+
+    default:
+      VisionTask_Finish();
+      break;
+  }
+}
+
+uint8_t VisionTask_StartCallAlly(void)
+{
+  /* 一次性：用过就不再受理，避免反复按键把 8s 无限续期。 */
+  if (call_ally_used != 0U)
+  {
+    printf("[VTASK] horn alarm ignored: already used (reset to re-arm)\r\n");
     return 0U;
   }
-  if ((uint32_t)(now - task_phase_tick) >= VISION_PARK_BLINK_MS)
+
+  call_ally_used       = 1U;
+  call_ally_active     = 1U;
+  call_ally_start_tick = HAL_GetTick();
+  task_state            = VISION_TASK_CALL_ALLY;
+
+  /* 原地呼唤：先把底盘停住，Step() 里每轮维持。 */
+  Car_ActionAbort();
+  Car_Stop();
+  VisionTask_CallAllyApply(1U);
+
+  printf("[VTASK] horn alarm started (%u ms)\r\n",
+         (unsigned)VISION_CALL_ALLY_DURATION_MS);
+  return 1U;
+}
+
+uint8_t VisionTask_StartTurnAround(void)
+{
+  Car_ActionAbort();
+
+  if (Car_StartRotateAngle(VISION_TURN_SPEED,
+                           (int32_t)VISION_TURN_AROUND_DEG10) != CAR_ACTION_BUSY)
   {
-    task_phase_tick = now;
-    task_phase ^= 1U;
+    printf("[VTASK] turn around rejected\r\n");
+    return 0U;
   }
-  VisionTask_Alert(task_phase);
+
+  VisionTask_Start(VISION_TASK_TURN_AROUND);
+  task_phase = 1U;   /* 旋转已发起，直接进等待相位 */
   return 1U;
 }
 
 /**
-  * @brief  1 号库：闪灯后停车并保持停止
+  * @brief  补给掉头：等旋转完成，超时兜底后交还循迹
   */
-static void VisionTask_RunPark1(void)
+static void VisionTask_RunTurnAround(void)
 {
-  Car_Stop();
-  if (VisionTask_RunBlink() != 0U)
+  if ((uint32_t)(HAL_GetTick() - task_start_tick) >=
+      VISION_TURN_AROUND_TIMEOUT_MS)
   {
-    return;
-  }
-  VisionTask_Buzzer(0U);
-  task_state = VISION_TASK_STOPPED;
-  printf("[VTASK] park 1 finished, stay stopped\r\n");
-}
-
-/**
-  * @brief  2 号库：闪灯后满速前进 2s
-  */
-static void VisionTask_RunPark2(void)
-{
-  uint32_t now;
-
-  if (task_phase < 2U)
-  {
+    printf("[VTASK] turn around timeout\r\n");
+    Car_ActionAbort();
     Car_Stop();
-
-    if (VisionTask_RunBlink() != 0U)
-    {
-      return;
-    }
-
-    /* 闪灯结束时重新取时间，避免把本次处理耗时算入前进阶段。 */
-    now = HAL_GetTick();
-    task_phase = 2U;
-    task_phase_tick = now;
-  }
-  else
-  {
-    now = HAL_GetTick();
-  }
-
-  Car_ForwardRun(VISION_SPEED_FULL);
-
-  if ((uint32_t)(now - task_phase_tick) >= VISION_PARK2_BOOST_MS)
-  {
     VisionTask_Finish();
-  }
-}
-
-/**
-  * @brief  转弯任务：非阻塞推进原地旋转
-  * @note   task_phase 0=还没发起动作，1=动作进行中。
-  *         car 的角度动作改成状态机后，转弯期间主循环仍能仲裁急停和手动接管。
-  */
-static void VisionTask_RunTurn(int32_t angle_deg10)
-{
-  if (task_phase == 0U)
-  {
-    if (Car_StartRotateAngle(VISION_TURN_SPEED, angle_deg10) != CAR_ACTION_BUSY)
-    {
-      /* 发起失败（速度低于标定下限、或已有动作在跑）：放弃任务，交回循迹。 */
-      printf("[VTASK] turn rejected\r\n");
-      VisionTask_Finish();
-      return;
-    }
-    task_phase = 1U;
     return;
   }
 
@@ -413,12 +718,16 @@ static void VisionTask_RunTurn(int32_t angle_deg10)
       break;
 
     case CAR_ACTION_DONE:
+      Car_Stop();
+      /* 掉头后沿原路返回会遇到来时的岔道，武装"全黑→全白→左转"规则。 */
+      LineTracker_ArmForkLeft();
+      printf("[VTASK] turn around done, fork-left armed, back to line track\r\n");
       VisionTask_Finish();
       break;
 
     default:
-      /* 超时或失败：car 已制动，任务照样结束，避免卡在这一相。 */
-      printf("[VTASK] turn failed\r\n");
+      printf("[VTASK] turn around failed\r\n");
+      Car_Stop();
       VisionTask_Finish();
       break;
   }
@@ -428,31 +737,29 @@ uint8_t VisionTask_Step(void)
 {
   switch (task_state)
   {
-    case VISION_TASK_TURN_LEFT:
-      /* 带符号角度：正=左转。 */
-      VisionTask_RunTurn((int32_t)VISION_TURN_ANGLE_DEG10);
-      return 1U;
-
-    case VISION_TASK_TURN_RIGHT:
-      VisionTask_RunTurn(-(int32_t)VISION_TURN_ANGLE_DEG10);
-      return 1U;
-
-    case VISION_TASK_HORN:
-      VisionTask_RunHorn();
-      return 1U;
-
-    case VISION_TASK_PARK_1:
-      VisionTask_RunPark1();
-      return 1U;
-
-    case VISION_TASK_PARK_2:
-      VisionTask_RunPark2();
-      return 1U;
-
     case VISION_TASK_STOPPED:
-      /* 1 号库结束后保持停止，仍占用底盘；新的视觉任务事件可重新唤醒
-         （见 VisionTask_Begin 对 STOPPED 的处理）。 */
       Car_Stop();
+      return 1U;
+
+    case VISION_TASK_FRIENDLY:
+      VisionTask_RunFriendly();
+      return 1U;
+
+    case VISION_TASK_NO_ENTRY:
+      VisionTask_RunNoEntry();
+      return 1U;
+
+    case VISION_TASK_WAREHOUSE:
+      VisionTask_RunWarehouse();
+      return 1U;
+
+    case VISION_TASK_CALL_ALLY:
+      /* 原地呼唤：底盘全程停住。灯笛节拍由 VisionTask_Tick() 驱动。 */
+      Car_Stop();
+      return 1U;
+
+    case VISION_TASK_TURN_AROUND:
+      VisionTask_RunTurnAround();
       return 1U;
 
     default:
@@ -471,12 +778,18 @@ void VisionTask_Cancel(void)
   VisionTask_Buzzer(0U);
   task_state = VISION_TASK_IDLE;
   task_phase = 0U;
+  warehouse_zero_count = 0U;
+  warehouse_phase = 0U;
+  warehouse_fwd_ms = 0U;
+  call_ally_active = 0U;
+  Indicator_Release(INDICATOR_PRIO_CALL_ALLY);
+  /* call_ally_used 有意不清：呼唤全程只允许一次，急停也不该让它复活。 */
 
-  /* 信号类动作也一并清掉：急停时白灯、限速、旋律都不该继续。
-     限速恢复由这里直接改 task_speed，调度器重进循迹时会取到正常值。 */
   signal_tunnel_until = 0U;
-  signal_rough_until = 0U;
+  signal_slow_until = 0U;
   signal_flash_until = 0U;
+  signal_narrow_until = 0U;
+  friendly_gap_tick = 0U;
   task_speed = VISION_SPEED_NORMAL;
   BuzzerTone_Stop();
   VisionTask_SignalLightApply();
@@ -486,4 +799,3 @@ uint8_t VisionTask_IsBusy(void)
 {
   return (task_state != VISION_TASK_IDLE) ? 1U : 0U;
 }
-
