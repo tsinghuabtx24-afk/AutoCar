@@ -70,7 +70,7 @@ const char *Scheduler_ModeName(Control_Mode mode)
 static uint8_t Scheduler_IsVisionEvent(Event_Type type)
 {
   return (uint8_t)((type >= EVENT_VISION_SPEED_LIMIT) &&
-                   (type <= EVENT_VISION_PARK_2));
+                   (type <= EVENT_VISION_LAST));
 }
 
 /**
@@ -267,6 +267,10 @@ void Scheduler_AvoidFinished(void)
 
 void Scheduler_Dispatch(void)
 {
+  /* 信号类视觉动作（隧道白灯、起伏路段限速、友军旋律）不占底盘，
+     必须不分模式每轮推进，否则循迹模式下白灯永不灭、限速永不恢复。 */
+  VisionTask_Tick();
+
   switch (scheduler_mode)
   {
     case CONTROL_STOP:

@@ -36,6 +36,21 @@ extern "C" {
 /* 2 号库：闪灯后满速前进的时间。 */
 #define VISION_PARK2_BOOST_MS      2000U
 
+/* ==== 不占底盘的"信号类"动作 ================================================
+   隧道 / 起伏路段 / 友军 都不接管底盘：车继续循迹，只叠加灯光、限速或声音。
+   所以它们不进 VisionTask_Step() 的状态机，而由 VisionTask_Tick() 每轮推进，
+   与当前控制模式无关（急停时由 VisionTask_Cancel() 一并清掉）。
+   ============================================================================ */
+
+/* 隧道：常亮白灯的时长。 */
+#define VISION_TUNNEL_LIGHT_MS     4000U
+
+/* 起伏路段：减速通过的时长，到点自动恢复原速。 */
+#define VISION_ROUGH_SLOW_MS       5000U
+
+/* 友军：RGB 短闪一次的亮灯时长。 */
+#define VISION_FRIENDLY_FLASH_MS   200U
+
 typedef enum
 {
   VISION_TASK_IDLE = 0,
@@ -67,6 +82,13 @@ uint8_t VisionTask_Step(void);
 void VisionTask_Cancel(void);
 
 uint8_t VisionTask_IsBusy(void);
+
+/*
+ * 推进信号类动作（隧道白灯、起伏路段限速、友军闪灯+旋律）。
+ * 必须每轮主循环调用一次，且不分控制模式——这些动作与底盘无关，
+ * 只在 CONTROL_TASK 模式里推进会导致循迹时白灯永不灭、限速永不恢复。
+ */
+void VisionTask_Tick(void);
 
 /* 当前巡线速度，受限速/解除限速事件影响。 */
 uint8_t VisionTask_GetSpeed(void);

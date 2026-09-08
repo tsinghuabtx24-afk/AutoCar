@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "main.h"
+#include "event.h"
 
 /* ==== 帧同步超时重整 ========================================================
    3 字节帧 0xAA / id / (0xAA^id)。原实现只按字节顺序推进 frame_step，丢字节后
@@ -17,16 +18,33 @@ extern "C" {
    ============================================================================ */
 #define VISION_FRAME_TIMEOUT_MS   20U
 
+/* ==== 识别类别与线上 id ======================================================
+   六个类别，按约定顺序：
+     1 仓库  2 禁止通行  3 隧道  4 起伏路段  5 友军  6 可清理障碍
+
+   线上 id = VISION_ID_FIRST + 类别序号。视觉端如果改成 0 基编号，
+   只改这一个宏即可，不用动映射表。
+   ============================================================================ */
+#define VISION_ID_FIRST   1U
+
 typedef enum
 {
-  VISION_TARGET_SPEED_NORMAL = 0U,
-  VISION_TARGET_SPEED_RELEASE,
-  VISION_TARGET_TURN_LEFT,
-  VISION_TARGET_TURN_RIGHT,
-  VISION_TARGET_HORN,
-  VISION_TARGET_PARK_1,
-  VISION_TARGET_PARK_2
+  VISION_TARGET_WAREHOUSE = 0U,      /* 仓库 */
+  VISION_TARGET_NO_ENTRY,            /* 禁止通行 */
+  VISION_TARGET_TUNNEL,              /* 隧道 */
+  VISION_TARGET_ROUGH_ROAD,          /* 起伏路段 */
+  VISION_TARGET_FRIENDLY,            /* 友军 */
+  VISION_TARGET_CLEARABLE_OBSTACLE,  /* 可清理障碍 */
+  VISION_TARGET_COUNT
 } Vision_Target;
+
+/* ==== 三个"动作暂不修改"的类别沿用哪个既有动作 ==============================
+   仓库 / 禁止通行 / 可清理障碍的动作代码本身未改动，只是换了触发它的类别。
+   要调整对应关系，改这三行就够。
+   ============================================================================ */
+#define VISION_EVENT_WAREHOUSE            EVENT_VISION_PARK_1   /* 闪灯后停住 */
+#define VISION_EVENT_NO_ENTRY             EVENT_VISION_TURN_LEFT /* 原地转 90° */
+#define VISION_EVENT_CLEARABLE_OBSTACLE   EVENT_VISION_HORN     /* 停车鸣两声 */
 
 typedef struct
 {

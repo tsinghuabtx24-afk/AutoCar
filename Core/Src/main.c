@@ -43,6 +43,7 @@
 #include "manual_task.h"
 #include "avoid_task.h"
 #include "indicator.h"
+#include "buzzer_tone.h"
 #include "ultrasonic_sense.h"
 #include "vision_nav.h"
 
@@ -258,6 +259,7 @@ int main(void)
   /* 事件队列必须在任何可能投递事件的模块之前初始化。 */
   Event_Init();
   Indicator_Init();
+  BuzzerTone_Init();
   VisionUart_Init();
   VisionTask_Init();
   ManualTask_Init();

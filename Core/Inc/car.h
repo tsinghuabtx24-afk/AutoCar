@@ -127,7 +127,7 @@ extern "C" {
    [ANGLE] start dir=... comp=x.xxx，那是表值与本系数相乘后的结果，可以
    直接核对。 */
 #define CAR_ROT_LEFT_SCALE_X1000    1050U
-#define CAR_ROT_RIGHT_SCALE_X1000   1250U   /* ⚠️ 待实测，见上面标定方法 */
+#define CAR_ROT_RIGHT_SCALE_X1000   1250U
 
 /* 半径转弯仅有 100 PWM 标定数据：左转约 45°，右转约 30°。 */
 #define CAR_TURN_LEFT_COMP_X1000    2100U

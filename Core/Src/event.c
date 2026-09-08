@@ -104,6 +104,9 @@ const char *Event_TypeName(Event_Type type)
     case EVENT_VISION_HORN:           return "VISION_HORN";
     case EVENT_VISION_PARK_1:         return "VISION_PARK_1";
     case EVENT_VISION_PARK_2:         return "VISION_PARK_2";
+    case EVENT_VISION_TUNNEL:         return "VISION_TUNNEL";
+    case EVENT_VISION_ROUGH_ROAD:     return "VISION_ROUGH_ROAD";
+    case EVENT_VISION_FRIENDLY:       return "VISION_FRIENDLY";
     case EVENT_OBSTACLE_LEFT:         return "OBSTACLE_LEFT";
     case EVENT_OBSTACLE_RIGHT:        return "OBSTACLE_RIGHT";
     case EVENT_OBSTACLE_BOTH:         return "OBSTACLE_BOTH";

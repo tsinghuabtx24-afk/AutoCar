@@ -28,7 +28,9 @@ typedef enum
 {
   EVENT_NONE = 0,
 
-  /* 视觉识别 */
+  /* 视觉识别。
+     这一段必须连续：scheduler 用 [EVENT_VISION_SPEED_LIMIT, EVENT_VISION_LAST]
+     的区间判断"是不是视觉事件"，新增视觉事件一律加在 EVENT_VISION_LAST 之前。 */
   EVENT_VISION_SPEED_LIMIT,
   EVENT_VISION_SPEED_RELEASE,
   EVENT_VISION_TURN_LEFT,
@@ -36,6 +38,15 @@ typedef enum
   EVENT_VISION_HORN,
   EVENT_VISION_PARK_1,
   EVENT_VISION_PARK_2,
+
+  /* 隧道：常亮白灯 5s。不占底盘，循迹继续。 */
+  EVENT_VISION_TUNNEL,
+  /* 起伏路段：限速 5s 后自动恢复原速。不占底盘。 */
+  EVENT_VISION_ROUGH_ROAD,
+  /* 友军：RGB 短闪一次 + 一段有音调的旋律。不占底盘。 */
+  EVENT_VISION_FRIENDLY,
+
+  EVENT_VISION_LAST = EVENT_VISION_FRIENDLY,
 
   /* 避障传感器。红外分左右，超声波只报前方。 */
   EVENT_OBSTACLE_LEFT,

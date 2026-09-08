@@ -59,10 +59,20 @@ static void Indicator_WriteRight(Indicator_Color color)
                     ((color & INDICATOR_BLUE)  != 0) ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
+/* 置 1 时本层不碰蜂鸣器引脚，由 buzzer_tone 独占（见 Indicator_SuspendBuzzer）。 */
+static uint8_t indicator_buzzer_suspended;
+
 static void Indicator_WriteBuzzer(uint8_t on)
 {
+  if (indicator_buzzer_suspended != 0U) return;
+
   HAL_GPIO_WritePin(Buzzer_GPIO_Port, Buzzer_Pin,
                     (on != 0U) ? GPIO_PIN_SET : GPIO_PIN_RESET);
+}
+
+void Indicator_SuspendBuzzer(uint8_t suspend)
+{
+  indicator_buzzer_suspended = suspend;
 }
 
 void Indicator_Init(void)

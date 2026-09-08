@@ -23,30 +23,32 @@ static Event_Type VisionUart_TargetToEvent(Vision_Target target)
 {
   switch (target)
   {
-    case VISION_TARGET_SPEED_NORMAL:  return EVENT_VISION_SPEED_LIMIT;
-    case VISION_TARGET_SPEED_RELEASE: return EVENT_VISION_SPEED_RELEASE;
-    case VISION_TARGET_TURN_LEFT:     return EVENT_VISION_TURN_LEFT;
-    case VISION_TARGET_TURN_RIGHT:    return EVENT_VISION_TURN_RIGHT;
-    case VISION_TARGET_HORN:          return EVENT_VISION_HORN;
-    case VISION_TARGET_PARK_1:        return EVENT_VISION_PARK_1;
-    case VISION_TARGET_PARK_2:        return EVENT_VISION_PARK_2;
-    default:                          return EVENT_NONE;
+    /* 动作未改动的三类，只是换了触发者，映射写在 vision_uart.h。 */
+    case VISION_TARGET_WAREHOUSE:           return VISION_EVENT_WAREHOUSE;
+    case VISION_TARGET_NO_ENTRY:            return VISION_EVENT_NO_ENTRY;
+    case VISION_TARGET_CLEARABLE_OBSTACLE:  return VISION_EVENT_CLEARABLE_OBSTACLE;
+
+    /* 新增动作的三类。 */
+    case VISION_TARGET_TUNNEL:              return EVENT_VISION_TUNNEL;
+    case VISION_TARGET_ROUGH_ROAD:          return EVENT_VISION_ROUGH_ROAD;
+    case VISION_TARGET_FRIENDLY:            return EVENT_VISION_FRIENDLY;
+
+    default:                                return EVENT_NONE;
   }
 }
 
+/**
+  * @brief  线上 id → 类别
+  * @retval 0xFF 表示 id 不在约定范围内，调用方按校验失败处理
+  */
 static Vision_Target VisionUart_IdToTarget(uint8_t id)
 {
-  switch (id)
+  if ((id < VISION_ID_FIRST) ||
+      (id >= (uint8_t)(VISION_ID_FIRST + (uint8_t)VISION_TARGET_COUNT)))
   {
-    case 0U: return VISION_TARGET_SPEED_NORMAL;
-    case 1U: return VISION_TARGET_SPEED_RELEASE;
-    case 2U: return VISION_TARGET_TURN_LEFT;
-    case 3U: return VISION_TARGET_TURN_RIGHT;
-    case 4U: return VISION_TARGET_HORN;
-    case 5U: return VISION_TARGET_PARK_1;
-    case 6U: return VISION_TARGET_PARK_2;
-    default: return (Vision_Target)0xFFU;
+    return (Vision_Target)0xFFU;
   }
+  return (Vision_Target)(uint8_t)(id - VISION_ID_FIRST);
 }
 
 void VisionUart_Init(void)
@@ -178,13 +180,12 @@ const char *VisionUart_TargetName(Vision_Target target)
 {
   switch (target)
   {
-    case VISION_TARGET_SPEED_NORMAL: return "NORMAL_SPEED";
-    case VISION_TARGET_SPEED_RELEASE: return "RELEASE_SPEED";
-    case VISION_TARGET_TURN_LEFT: return "TURN_LEFT";
-    case VISION_TARGET_TURN_RIGHT: return "TURN_RIGHT";
-    case VISION_TARGET_HORN: return "HORN";
-    case VISION_TARGET_PARK_1: return "PARK_1";
-    case VISION_TARGET_PARK_2: return "PARK_2";
+    case VISION_TARGET_WAREHOUSE:          return "WAREHOUSE";
+    case VISION_TARGET_NO_ENTRY:           return "NO_ENTRY";
+    case VISION_TARGET_TUNNEL:             return "TUNNEL";
+    case VISION_TARGET_ROUGH_ROAD:         return "ROUGH_ROAD";
+    case VISION_TARGET_FRIENDLY:           return "FRIENDLY";
+    case VISION_TARGET_CLEARABLE_OBSTACLE: return "CLEARABLE_OBSTACLE";
     default: return "UNKNOWN";
   }
 }

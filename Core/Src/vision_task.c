@@ -1,4 +1,5 @@
 #include "vision_task.h"
+#include "buzzer_tone.h"
 #include "car.h"
 #include "indicator.h"
 #include "line_tracker.h"
@@ -27,6 +28,14 @@ static uint8_t task_speed;
    不会再被红外的"无障碍则灭灯"覆盖。 */
 static uint8_t task_alert_on;
 static uint8_t task_buzzer_on;
+
+/* ---- 信号类动作的独立状态 ----
+   这三个与底盘任务并行，各自一套计时，互不排斥：过隧道时遇到起伏路段，
+   白灯和限速应该同时生效。0 = 未激活。 */
+static uint32_t signal_tunnel_until;    /* 白灯到期 tick，0=不亮 */
+static uint32_t signal_rough_until;     /* 限速到期 tick，0=不限速 */
+static uint32_t signal_flash_until;     /* 友军短闪到期 tick，0=不闪 */
+static uint8_t  signal_light_shown;     /* 当前是否已向指示层申请信号灯 */
 
 static void VisionTask_Apply(void)
 {
@@ -60,6 +69,81 @@ static void VisionTask_Buzzer(uint8_t on)
   VisionTask_Apply();
 }
 
+/**
+  * @brief  把信号类灯效落到指示层
+  * @note   友军短闪优先于隧道白灯：两者同时激活时先给短闪，几百毫秒后
+  *         自然回到白灯。都不激活才撤销申请，避免抢掉别的模块的灯。
+  */
+static void VisionTask_SignalLightApply(void)
+{
+  Indicator_Color color;
+
+  if (signal_flash_until != 0U)
+  {
+    color = INDICATOR_WHITE;
+  }
+  else if (signal_tunnel_until != 0U)
+  {
+    color = INDICATOR_WHITE;
+  }
+  else
+  {
+    if (signal_light_shown != 0U)
+    {
+      Indicator_Release(INDICATOR_PRIO_SIGNAL);
+      signal_light_shown = 0U;
+    }
+    return;
+  }
+
+  /* 蜂鸣交给 buzzer_tone 直接驱动引脚，这里只申请灯，blink_ms=0 即常亮。 */
+  Indicator_Request(INDICATOR_PRIO_SIGNAL, INDICATOR_BUZZER_OFF,
+                    color, color, 0U);
+  signal_light_shown = 1U;
+}
+
+/* 起伏路段限速期间的巡线速度。 */
+static uint8_t VisionTask_SpeedForSignals(void)
+{
+  if (signal_rough_until != 0U)
+  {
+    return (uint8_t)(VISION_SPEED_NORMAL - VISION_SPEED_LIMIT_DROP);
+  }
+  return VISION_SPEED_NORMAL;
+}
+
+void VisionTask_Tick(void)
+{
+  uint32_t now = HAL_GetTick();
+
+  /* 到期判断用有符号差值：tick 回绕时仍然正确。 */
+  if ((signal_tunnel_until != 0U) &&
+      ((int32_t)(now - signal_tunnel_until) >= 0))
+  {
+    signal_tunnel_until = 0U;
+    printf("[VTASK] tunnel light off\r\n");
+  }
+
+  if ((signal_flash_until != 0U) &&
+      ((int32_t)(now - signal_flash_until) >= 0))
+  {
+    signal_flash_until = 0U;
+  }
+
+  if ((signal_rough_until != 0U) &&
+      ((int32_t)(now - signal_rough_until) >= 0))
+  {
+    signal_rough_until = 0U;
+    task_speed = VISION_SPEED_NORMAL;
+    LineTracker_SetBaseSpeed(task_speed);
+    printf("[VTASK] rough road passed, speed restored to %u\r\n",
+           (unsigned)task_speed);
+  }
+
+  VisionTask_SignalLightApply();
+  BuzzerTone_Step();
+}
+
 /* 内部启动一个任务。公开的 VisionTask_Begin(Event_Type) 是调度器入口，
    两者名字容易混，这个改叫 Start。 */
 static void VisionTask_Start(VisionTask_State state)
@@ -87,8 +171,13 @@ void VisionTask_Init(void)
   task_phase_tick = 0U;
   task_phase = 0U;
   task_speed = VISION_SPEED_NORMAL;
+  signal_tunnel_until = 0U;
+  signal_rough_until = 0U;
+  signal_flash_until = 0U;
+  signal_light_shown = 0U;
   VisionTask_Alert(0U);
   VisionTask_Buzzer(0U);
+  Indicator_Release(INDICATOR_PRIO_SIGNAL);
 }
 
 uint8_t VisionTask_GetSpeed(void) { return task_speed; }
@@ -138,6 +227,36 @@ uint8_t VisionTask_Begin(Event_Type type)
       /* 解除限速：恢复正常巡线速度。 */
       task_speed = VISION_SPEED_NORMAL;
       printf("[VTASK] speed restored to %u\r\n", (unsigned)task_speed);
+      return 0U;
+
+    case EVENT_VISION_TUNNEL:
+      /* 隧道：常亮白灯 5s 后关闭。车照常循迹，不抢底盘。
+         重复识别到同一隧道就顺延 5s，不会来回开关。 */
+      signal_tunnel_until = HAL_GetTick() + VISION_TUNNEL_LIGHT_MS;
+      if (signal_tunnel_until == 0U) signal_tunnel_until = 1U;  /* 0 是"未激活" */
+      VisionTask_SignalLightApply();
+      printf("[VTASK] tunnel: white light %u ms\r\n",
+             (unsigned)VISION_TUNNEL_LIGHT_MS);
+      return 0U;
+
+    case EVENT_VISION_ROUGH_ROAD:
+      /* 起伏路段：减速通过 5s 后恢复原速。同样不抢底盘，只改巡线速度。
+         调用方（scheduler）在返回 0 后会同步 VisionTask_GetSpeed()。 */
+      signal_rough_until = HAL_GetTick() + VISION_ROUGH_SLOW_MS;
+      if (signal_rough_until == 0U) signal_rough_until = 1U;
+      task_speed = VisionTask_SpeedForSignals();
+      printf("[VTASK] rough road: speed %u for %u ms\r\n",
+             (unsigned)task_speed, (unsigned)VISION_ROUGH_SLOW_MS);
+      return 0U;
+
+    case EVENT_VISION_FRIENDLY:
+      /* 友军：短闪一次 + 一段有音调的旋律，表示"识别到友军，安全"。
+         不停车、不抢底盘。 */
+      signal_flash_until = HAL_GetTick() + VISION_FRIENDLY_FLASH_MS;
+      if (signal_flash_until == 0U) signal_flash_until = 1U;
+      VisionTask_SignalLightApply();
+      BuzzerTone_Play(BUZZER_MELODY_FRIENDLY, BUZZER_MELODY_FRIENDLY_LEN);
+      printf("[VTASK] friendly: flash + melody\r\n");
       return 0U;
 
     case EVENT_VISION_TURN_LEFT:
@@ -352,6 +471,15 @@ void VisionTask_Cancel(void)
   VisionTask_Buzzer(0U);
   task_state = VISION_TASK_IDLE;
   task_phase = 0U;
+
+  /* 信号类动作也一并清掉：急停时白灯、限速、旋律都不该继续。
+     限速恢复由这里直接改 task_speed，调度器重进循迹时会取到正常值。 */
+  signal_tunnel_until = 0U;
+  signal_rough_until = 0U;
+  signal_flash_until = 0U;
+  task_speed = VISION_SPEED_NORMAL;
+  BuzzerTone_Stop();
+  VisionTask_SignalLightApply();
 }
 
 uint8_t VisionTask_IsBusy(void)

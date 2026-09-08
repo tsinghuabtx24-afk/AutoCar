@@ -11,8 +11,7 @@
   *          每轮取最高优先级的有效申请落到硬件。闪烁相位由本模块统一维护，
   *          申请方只给周期。
   *
-  *          顺带修掉 RGB_SetColor() 的坑：那个函数的 r 参数实际控制右侧红灯、
-  *          g 控制左侧，交叉映射极易用错。本层接口直接用 left / right 命名。
+  *          RGB_SetColor() 函数的 r 参数实际控制右侧红灯、g 控制左侧，交叉映射极易用错。本层接口直接用 left / right 命名。
   ******************************************************************************
   */
 #ifndef __INDICATOR_H__
@@ -29,6 +28,8 @@ typedef enum
 {
   INDICATOR_PRIO_NONE = 0,
   INDICATOR_PRIO_TASK,     /* 入库闪灯、鸣笛 */
+  INDICATOR_PRIO_SIGNAL,   /* 视觉信号灯效：隧道白灯、友军短闪。短时且不占底盘，
+                              压在 TASK 之上，否则会被同时在跑的任务灯覆盖 */
   INDICATOR_PRIO_MANUAL,   /* 遥控手动接管提示 */
   INDICATOR_PRIO_AVOID,    /* 避障告警 */
   INDICATOR_PRIO_FAULT,    /* 急停 / 故障 */
@@ -84,6 +85,13 @@ void Indicator_Release(Indicator_Prio prio);
 
 /* 撤销全部申请并关闭硬件。 */
 void Indicator_ReleaseAll(void);
+
+/*
+ * 暂时交出蜂鸣器引脚。buzzer_tone 播放旋律时需要按音高翻转引脚，
+ * 本层每轮写 GPIO 会把方波压平，所以播放期间置 1，结束置 0。
+ * 只影响蜂鸣器，灯光仲裁照常。
+ */
+void Indicator_SuspendBuzzer(uint8_t suspend);
 
 /* 每轮主循环调用一次：裁决并写 GPIO。 */
 void Indicator_Step(void);
