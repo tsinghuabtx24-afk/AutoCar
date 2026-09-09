@@ -18,6 +18,11 @@ static uint32_t vnav_rejected;
 /* 本控制周期的图案，由 OnPattern() 存入、TakeTurnRequest() 取用。
    两者都在同一个循迹周期内被调用，所以不存在过期问题。 */
 static uint8_t  vnav_last_pattern;
+/* 上一次**接受**视觉事件的时刻与类型，喂 VNAV_ACCEPT_COOLDOWN_MS。取消黑线
+   门控后由它承担去重，替代原先"执行完就关门"。
+   记类型是为了做到"只压制同一种信号的重复"，见 vision_nav.h 的说明。 */
+static uint32_t   vnav_accept_tick;
+static Event_Type vnav_accept_type;
 
 const char *VisionNav_StateName(VisionNav_State state)
 {
@@ -57,11 +62,20 @@ void VisionNav_Init(void)
   vnav_turn_dir      = 0;
   vnav_rejected      = 0U;
   vnav_last_pattern  = 0xFFU;
-  printf("[VNAV] init: gate %s, turn cmd %u.%u deg\r\n",
+  /* 冷却置为"已过期"，否则开机头 VNAV_ACCEPT_COOLDOWN_MS 内的第一个视觉事件
+     会被白挡一次。无符号回绕算术，HAL_GetTick() 小于冷却值时结果依然正确。 */
+  vnav_accept_tick   = HAL_GetTick() - (uint32_t)VNAV_ACCEPT_COOLDOWN_MS;
+  vnav_accept_type   = EVENT_NONE;
+  printf("[VNAV] init: gate %s, open-on-black %s, turn cmd %u.%u deg\r\n",
 #if VNAV_ENABLE
          "ENABLED",
 #else
          "DISABLED (vision always open)",
+#endif
+#if VNAV_REQUIRE_BLACK_TO_OPEN
+         "REQUIRED",
+#else
+         "not required",
 #endif
          (unsigned)(VNAV_TURN_DEG10 / 10U), (unsigned)(VNAV_TURN_DEG10 % 10U));
 }
@@ -77,10 +91,50 @@ void VisionNav_Reset(void)
   vnav_turn_dir   = 0;
 }
 
+/**
+  * @brief  当前**状态**允许识别吗（不含去重）
+  */
+static uint8_t VisionNav_StateAllows(void)
+{
+#if VNAV_REQUIRE_BLACK_TO_OPEN
+  return (uint8_t)((vnav_state == VNAV_OPEN) ? 1U : 0U);
+#else
+  /* 取消黑线条件：ARMED 就算门开。但机动进行中和锁定期仍然关着——这两段
+     再接新信号会把两段式编排打乱，和原行为一致。 */
+  return (uint8_t)(((vnav_state == VNAV_ARMED) ||
+                    (vnav_state == VNAV_OPEN)) ? 1U : 0U);
+#endif
+}
+
+/**
+  * @brief  这个事件是不是刚执行过的重复帧
+  * @retval 1=应压制
+  *
+  * @note   只压制**同一种**信号的重复。vision_uart 每收到一个合法帧就投一个
+  *         事件，标志牌在视野里停留多久就投多少个；但换了一种信号就说明车已经
+  *         看到别的牌子了，必须立刻放行。
+  */
+static uint8_t VisionNav_CooldownBlocks(Event_Type type)
+{
+#if (VNAV_REQUIRE_BLACK_TO_OPEN == 0U) && (VNAV_ACCEPT_COOLDOWN_MS > 0U)
+  if (type != vnav_accept_type)
+  {
+    return 0U;
+  }
+  return (uint8_t)(((uint32_t)(HAL_GetTick() - vnav_accept_tick) <
+                    (uint32_t)VNAV_ACCEPT_COOLDOWN_MS) ? 1U : 0U);
+#else
+  /* 保留黑线门控时靠"执行完关门"去重，不需要冷却。 */
+  (void)type;
+  return 0U;
+#endif
+}
+
 uint8_t VisionNav_IsVisionOpen(void)
 {
 #if VNAV_ENABLE
-  return (uint8_t)((vnav_state == VNAV_OPEN) ? 1U : 0U);
+  /* 诊断用，报的是门本身的状态，不含按类型的去重。 */
+  return VisionNav_StateAllows();
 #else
   return 1U;   /* 关闭门控时视觉常开 */
 #endif
@@ -133,13 +187,27 @@ uint8_t VisionNav_OnVisionEvent(Event_Type type)
 {
 #if VNAV_ENABLE
   /* ---- 门没开：一律丢弃 ---- */
-  if (vnav_state != VNAV_OPEN)
+  if (VisionNav_StateAllows() == 0U)
   {
     vnav_rejected++;
     printf("[VNAV] reject %s: gate closed at %s\r\n",
            Event_TypeName(type), VisionNav_StateName(vnav_state));
     return 0U;
   }
+
+  /* ---- 同一块牌子的重复帧：静默丢弃 ----
+     只计数不打印。摄像头几十帧每秒，每帧打一行会把 USART1 占满，而 printf
+     是阻塞发送，会直接拖慢循迹的控制周期。 */
+  if (VisionNav_CooldownBlocks(type) != 0U)
+  {
+    vnav_rejected++;
+    return 0U;
+  }
+
+  /* 走到这里就是**接受**了，冷却从此刻起算。转向信号也记——它同样不该被
+     同一块牌子的后续帧重复触发。 */
+  vnav_accept_tick = HAL_GetTick();
+  vnav_accept_type = type;
 
   /* ---- 转向信号：不直接执行，转为内部两段式机动 ---- */
   if ((type == EVENT_VISION_TURN_LEFT) || (type == EVENT_VISION_TURN_RIGHT))
@@ -169,6 +237,7 @@ void VisionNav_OnPattern(uint8_t pattern)
 
   switch (vnav_state)
   {
+#if VNAV_REQUIRE_BLACK_TO_OPEN
     case VNAV_ARMED:
       /* 全黑是开启视觉的唯一条件（另一个条件 s==1 即本状态本身）。 */
       if (pattern == VNAV_PATTERN_ALL_BLACK)
@@ -177,6 +246,11 @@ void VisionNav_OnPattern(uint8_t pattern)
         VisionNav_Enter(VNAV_OPEN);
       }
       break;
+#else
+    /* 黑线条件已取消：ARMED 本身就算门开，这里不再需要为开门做状态转换。
+       全黑此时只剩"第二段机动的触发图案"这一个身份，由 TakeTurnRequest()
+       在 TURN_2_WAIT 下处理。 */
+#endif
 
     case VNAV_TURN_1_WAIT:
     case VNAV_TURN_2_WAIT:

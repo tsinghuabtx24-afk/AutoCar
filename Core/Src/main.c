@@ -297,6 +297,10 @@ int main(void)
     /* 3. 分派：本轮只有一个模块获得底盘控制权。 */
     Scheduler_Dispatch();
 
+    /* 3.5 鸣笛：不占底盘，所以不能挂在 Scheduler_Dispatch() 里（那里每轮只有
+           一个模块拿到控制权）。放在这里让它与循迹/避障并行推进，车不停。 */
+    VisionTask_StepHorn();
+
     /* 4. 指示层：按优先级裁决蜂鸣与 RGB，各模块只申请不直写。 */
     Indicator_Step();
 

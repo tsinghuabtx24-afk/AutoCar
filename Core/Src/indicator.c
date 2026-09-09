@@ -18,6 +18,11 @@ typedef struct
   /* 点鸣状态：已完成的"声"数与本相位起点。仅 buzzer 为 BEEPS(n) 时有意义。 */
   uint8_t         beep_phase;
   uint32_t        beep_tick;
+
+  /* 定时申请：hold_ms 非 0 时，start_tick 起算满 hold_ms 就自动撤销。
+     0 = 一直有效直到显式 Release。 */
+  uint16_t        hold_ms;
+  uint32_t        start_tick;
 } Indicator_Slot;
 
 static Indicator_Slot indicator_slots[INDICATOR_PRIO_COUNT];
@@ -69,7 +74,8 @@ void Indicator_Init(void)
 {
   for (uint8_t i = 0U; i < (uint8_t)INDICATOR_PRIO_COUNT; i++)
   {
-    indicator_slots[i].active = 0U;
+    indicator_slots[i].active  = 0U;
+    indicator_slots[i].hold_ms = 0U;
   }
   indicator_blink_tick = HAL_GetTick();
   indicator_blink_on   = 1U;
@@ -79,9 +85,9 @@ void Indicator_Init(void)
   Indicator_WriteRight(INDICATOR_OFF);
 }
 
-void Indicator_Request(Indicator_Prio prio, uint8_t buzzer,
-                       Indicator_Color left, Indicator_Color right,
-                       uint16_t blink_ms)
+void Indicator_RequestTimed(Indicator_Prio prio, uint8_t buzzer,
+                            Indicator_Color left, Indicator_Color right,
+                            uint16_t blink_ms, uint16_t hold_ms)
 {
   Indicator_Slot *slot;
 
@@ -98,6 +104,13 @@ void Indicator_Request(Indicator_Prio prio, uint8_t buzzer,
       (slot->left     == left)    && (slot->right  == right)  &&
       (slot->blink_ms == blink_ms))
   {
+    /* 定时申请例外：重复申请当作"续期"，把 hold_ms 从现在重新起算。
+       "每识别到一次就再亮 1s"靠的就是这一条。点鸣计数仍然不动。 */
+    if (hold_ms != 0U)
+    {
+      slot->hold_ms    = hold_ms;
+      slot->start_tick = HAL_GetTick();
+    }
     return;
   }
 
@@ -108,6 +121,16 @@ void Indicator_Request(Indicator_Prio prio, uint8_t buzzer,
   slot->blink_ms   = blink_ms;
   slot->beep_phase = 0U;
   slot->beep_tick  = HAL_GetTick();
+  slot->hold_ms    = hold_ms;
+  slot->start_tick = slot->beep_tick;
+}
+
+void Indicator_Request(Indicator_Prio prio, uint8_t buzzer,
+                       Indicator_Color left, Indicator_Color right,
+                       uint16_t blink_ms)
+{
+  /* hold_ms=0：不自动撤销，行为与改动前完全一致。 */
+  Indicator_RequestTimed(prio, buzzer, left, right, blink_ms, 0U);
 }
 
 void Indicator_Release(Indicator_Prio prio)
@@ -176,6 +199,19 @@ void Indicator_Step(void)
   Indicator_Slot *winner = NULL;
   uint32_t now = HAL_GetTick();
   uint8_t  show;
+
+  /* 定时申请到期就自动撤销，调用方不必自己记时间。必须在裁决**之前**做，
+     否则本轮还会按已过期的申请点灯。 */
+  for (uint8_t i = 1U; i < (uint8_t)INDICATOR_PRIO_COUNT; i++)
+  {
+    Indicator_Slot *s = &indicator_slots[i];
+
+    if ((s->active != 0U) && (s->hold_ms != 0U) &&
+        ((uint32_t)(now - s->start_tick) >= (uint32_t)s->hold_ms))
+    {
+      s->active = 0U;
+    }
+  }
 
   /* 从高优先级往低找第一个有效申请。 */
   for (int8_t i = (int8_t)INDICATOR_PRIO_COUNT - 1; i > 0; i--)

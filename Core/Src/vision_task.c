@@ -22,6 +22,15 @@ static uint32_t task_start_tick;
 static uint32_t task_phase_tick;
 static uint8_t task_phase;
 static uint8_t task_speed;
+/* 停在 1 号库那一刻的速度快照，2 号库起步时用它。
+   0 = 没有快照（没经过 1 号库、直接来的 2 号库），此时退回当前巡线速度。 */
+static uint8_t task_resume_speed;
+
+/* ---- 鸣笛：独立于 task_state 的一条小状态机 ----
+   鸣笛不占底盘，和任何任务（乃至循迹、避障）并行，所以不能占用 task_state。 */
+static uint8_t  horn_active;
+static uint8_t  horn_phase;      /* 偶数相位=响，奇数=停 */
+static uint32_t horn_phase_tick;
 
 /* 当前的灯与蜂鸣申请状态。通过指示层申请而不是直写 GPIO，这样入库闪灯
    不会再被红外的"无障碍则灭灯"覆盖。 */
@@ -77,6 +86,8 @@ static void VisionTask_Finish(void)
   VisionTask_Buzzer(0U);
   task_state = VISION_TASK_IDLE;
   task_phase = 0U;
+  /* 快照已消费，清掉：否则以后单独来一次 2 号库会拿着很久以前的值起步。 */
+  task_resume_speed = 0U;
   printf("[VTASK] done, speed=%u\r\n", (unsigned)task_speed);
 }
 
@@ -87,6 +98,10 @@ void VisionTask_Init(void)
   task_phase_tick = 0U;
   task_phase = 0U;
   task_speed = VISION_SPEED_NORMAL;
+  task_resume_speed = 0U;
+  horn_active = 0U;
+  horn_phase = 0U;
+  horn_phase_tick = 0U;
   VisionTask_Alert(0U);
   VisionTask_Buzzer(0U);
 }
@@ -100,7 +115,6 @@ const char *VisionTask_StateName(VisionTask_State state)
   {
     case VISION_TASK_TURN_LEFT: return "TURN_LEFT";
     case VISION_TASK_TURN_RIGHT: return "TURN_RIGHT";
-    case VISION_TASK_HORN: return "HORN";
     case VISION_TASK_PARK_1: return "PARK_1";
     case VISION_TASK_PARK_2: return "PARK_2";
     case VISION_TASK_STOPPED: return "STOPPED";
@@ -114,15 +128,41 @@ const char *VisionTask_StateName(VisionTask_State state)
   *
   * @note   限速/解除限速是持续配置，只改巡线速度，不创建任务也不抢占底盘。
   *
-  * @note   任务运行中不接收新任务事件，避免反复重启动作。VISION_TASK_STOPPED
-  *         （1 号库停稳后）允许接受新任务：设计意图是"停在库里直到识别到新的
-  *         视觉任务"。
+  * @note   任务运行中不接收新任务事件，避免反复重启动作。
+  *
+  * @note   VISION_TASK_STOPPED（1 号库停稳后）**只接受 2 号库**：其余视觉任务
+  *         事件一律忽略，车原地不动、继续识别，直到 2 号库出现才重新启动。
+  *         改动前这里接受任何任务事件，鸣笛或转向标志都能把车从库里叫走。
+  *
+  *         限速/解除限速不受此限——它们只改配置不动底盘，停着改完等启动后生效。
   */
 uint8_t VisionTask_Begin(Event_Type type)
 {
-  /* 可以起新任务的状态：空闲，或 1 号库停稳后的停止态。 */
-  uint8_t acceptable = (uint8_t)((task_state == VISION_TASK_IDLE) ||
-                                 (task_state == VISION_TASK_STOPPED));
+  uint8_t acceptable;
+
+  if (task_state == VISION_TASK_IDLE)
+  {
+    acceptable = 1U;
+  }
+  else if (task_state == VISION_TASK_STOPPED)
+  {
+    /* 停在 1 号库里：只有 2 号库能把车叫起来。 */
+    acceptable = (uint8_t)((type == EVENT_VISION_PARK_2) ? 1U : 0U);
+
+    /* 限速类不算"被忽略的任务"，别误报。 */
+    if ((acceptable == 0U) &&
+        (type != EVENT_VISION_SPEED_LIMIT) &&
+        (type != EVENT_VISION_SPEED_RELEASE))
+    {
+      printf("[VTASK] parked at 1, ignore %s (waiting for PARK_2)\r\n",
+             Event_TypeName(type));
+    }
+  }
+  else
+  {
+    /* 任务进行中（含 1 号库那 2s 闪灯相位）：不接新任务。 */
+    acceptable = 0U;
+  }
 
   switch (type)
   {
@@ -151,9 +191,14 @@ uint8_t VisionTask_Begin(Event_Type type)
       return 1U;
 
     case EVENT_VISION_HORN:
-      if (acceptable == 0U) return 0U;
-      VisionTask_Start(VISION_TASK_HORN);
-      return 1U;
+      /* 鸣笛不占底盘、不停车：起一条独立的节奏，返回 0 让调度器保持当前模式
+         （通常是循迹），车照常往前走。
+         不看 acceptable——停在 1 号库里也可以鸣笛，那不影响"等 2 号库"。 */
+      horn_active     = 1U;
+      horn_phase      = 0U;
+      horn_phase_tick = HAL_GetTick();
+      printf("[VTASK] horn (no stop)\r\n");
+      return 0U;
 
     case EVENT_VISION_PARK_1:
       if (acceptable == 0U) return 0U;
@@ -171,30 +216,40 @@ uint8_t VisionTask_Begin(Event_Type type)
 }
 
 /**
-  * @brief  鸣笛任务：响 0.5s、停 0.2s，共两声，期间停车
+  * @brief  鸣笛：响 0.5s、停 0.2s，共两声，**期间不停车**
+  * @note   由主循环每轮调用，与控制模式无关。不碰底盘，只驱动蜂鸣器。
   */
-static void VisionTask_RunHorn(void)
+void VisionTask_StepHorn(void)
 {
-  uint32_t now = HAL_GetTick();
-  uint32_t elapsed = (uint32_t)(now - task_phase_tick);
-  uint8_t beeping = (uint8_t)((task_phase % 2U) == 0U);
-  uint32_t limit = (beeping != 0U) ? VISION_HORN_ON_MS : VISION_HORN_GAP_MS;
+  uint32_t now;
+  uint8_t  beeping;
+  uint32_t limit;
 
-  Car_Stop();
-  VisionTask_Buzzer(beeping);
-
-  if (elapsed < limit)
+  if (horn_active == 0U)
   {
     return;
   }
 
-  task_phase++;
-  task_phase_tick = now;
+  now     = HAL_GetTick();
+  beeping = (uint8_t)((horn_phase % 2U) == 0U);
+  limit   = (beeping != 0U) ? VISION_HORN_ON_MS : VISION_HORN_GAP_MS;
+
+  VisionTask_Buzzer(beeping);
+
+  if ((uint32_t)(now - horn_phase_tick) < limit)
+  {
+    return;
+  }
+
+  horn_phase++;
+  horn_phase_tick = now;
 
   /* 每声占用「响 + 停」两个阶段。 */
-  if (task_phase >= (uint8_t)(VISION_HORN_COUNT * 2U))
+  if (horn_phase >= (uint8_t)(VISION_HORN_COUNT * 2U))
   {
-    VisionTask_Finish();
+    horn_active = 0U;
+    VisionTask_Buzzer(0U);
+    printf("[VTASK] horn done\r\n");
   }
 }
 
@@ -230,37 +285,32 @@ static void VisionTask_RunPark1(void)
     return;
   }
   VisionTask_Buzzer(0U);
+  /* 在**停下这一刻**取速度快照，而不是等 2 号库来了再读 task_speed：停在库里
+     期间如果又收到限速标志，task_speed 会变，而需求要的是"停止前"那个值。 */
+  task_resume_speed = task_speed;
   task_state = VISION_TASK_STOPPED;
-  printf("[VTASK] park 1 finished, stay stopped\r\n");
+  printf("[VTASK] parked at 1, waiting for PARK_2 (resume speed %u)\r\n",
+         (unsigned)task_resume_speed);
 }
 
 /**
-  * @brief  2 号库：闪灯后满速前进 2s
+  * @brief  2 号库：立即前进 VISION_PARK2_BOOST_MS，然后交回循迹
+  * @note   **没有闪灯相位**：识别到 2 号库就是"起步"信号，先停着闪 2s 灯与
+  *         "从库里开出去"的语义相反，已整段删除（原 VisionTask_RunBlink 调用）。
+  *
+  * @note   起步速度见 VISION_PARK2_FULL_SPEED：默认用停在 1 号库之前的速度，
+  *         不是满速——满速会把限速吞掉，也容易一起步就冲出赛道。
   */
 static void VisionTask_RunPark2(void)
 {
-  uint32_t now;
+  uint32_t now = HAL_GetTick();
 
-  if (task_phase < 2U)
-  {
-    Car_Stop();
-
-    if (VisionTask_RunBlink() != 0U)
-    {
-      return;
-    }
-
-    /* 闪灯结束时重新取时间，避免把本次处理耗时算入前进阶段。 */
-    now = HAL_GetTick();
-    task_phase = 2U;
-    task_phase_tick = now;
-  }
-  else
-  {
-    now = HAL_GetTick();
-  }
-
+#if VISION_PARK2_FULL_SPEED
   Car_ForwardRun(VISION_SPEED_FULL);
+#else
+  /* 停在 1 号库之前的速度；没经过 1 号库直接来的 2 号库就用当前巡线速度。 */
+  Car_ForwardRun((task_resume_speed != 0U) ? task_resume_speed : task_speed);
+#endif
 
   if ((uint32_t)(now - task_phase_tick) >= VISION_PARK2_BOOST_MS)
   {
@@ -318,9 +368,7 @@ uint8_t VisionTask_Step(void)
       VisionTask_RunTurn(-(int32_t)VISION_TURN_ANGLE_DEG10);
       return 1U;
 
-    case VISION_TASK_HORN:
-      VisionTask_RunHorn();
-      return 1U;
+    /* 鸣笛不在这里：它不占底盘，由主循环直接调 VisionTask_StepHorn()。 */
 
     case VISION_TASK_PARK_1:
       VisionTask_RunPark1();
@@ -352,6 +400,10 @@ void VisionTask_Cancel(void)
   VisionTask_Buzzer(0U);
   task_state = VISION_TASK_IDLE;
   task_phase = 0U;
+  /* 急停/被抢占时整个任务作废，快照一起丢掉。 */
+  task_resume_speed = 0U;
+  /* 鸣笛虽然不占底盘，但急停要静音——那时蜂鸣器归故障告警用。 */
+  horn_active = 0U;
 }
 
 uint8_t VisionTask_IsBusy(void)

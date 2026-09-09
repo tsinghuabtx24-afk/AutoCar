@@ -12,8 +12,8 @@ extern "C" {
 /* ==== 速度配置 ==============================================================
    巡线默认速度与限速后的速度。速度刻度沿用 car 模块的 0~100 占空比刻度。
    ============================================================================ */
-#define VISION_SPEED_NORMAL        65U
-#define VISION_SPEED_LIMIT_DROP    10U
+#define VISION_SPEED_NORMAL        60U
+#define VISION_SPEED_LIMIT_DROP    7U
 #define VISION_SPEED_FULL          100U
 
 /* _Static_assert 见 vision_task.c：限速后的速度必须仍在死区之上。
@@ -24,7 +24,15 @@ extern "C" {
 #define VISION_TURN_SPEED          80U
 #define VISION_TURN_ANGLE_DEG10    900U
 
-/* 鸣笛：响 0.5s，间隔 0.2s，共两声。 */
+/* ==== 鸣笛 ==================================================================
+   响 0.5s，间隔 0.2s，共两声。
+
+   ⚠️ 鸣笛**不占用底盘、不停车**：它只是叫两声，车照常循迹。所以它不是一个
+      "任务"——VisionTask_Begin() 收到鸣笛事件时返回 0（模式不变），节奏由
+      VisionTask_StepHorn() 在主循环里独立推进。
+
+      改动前它是任务：每轮调 Car_Stop()、抢占 CONTROL_TASK 模式，车要停 1.4s。
+   ============================================================================ */
 #define VISION_HORN_ON_MS          500U
 #define VISION_HORN_GAP_MS         200U
 #define VISION_HORN_COUNT          2U
@@ -33,15 +41,26 @@ extern "C" {
 #define VISION_PARK_BLINK_MS       200U
 #define VISION_PARK_BLINK_TOTAL_MS 2000U
 
-/* 2 号库：闪灯后满速前进的时间。 */
+/* 2 号库：闪灯后前进的时间。 */
 #define VISION_PARK2_BOOST_MS      2000U
+
+/* ==== 2 号库的起步速度 ======================================================
+   0 = 用**停在 1 号库之前的那个速度**起步（当前行为）。停之前如果正在限速，
+       起步也保持限速，车速是连续的。
+   1 = 旧行为：一律 VISION_SPEED_FULL(100) 满速冲。
+
+   为什么默认取 0：满速起步与"从库里正常驶出"不是一回事——1 号库停车前车是在
+   循迹速度上走的，起步换成 100 会让车一下冲出赛道，而且如果停车前刚吃过限速
+   标志，满速起步等于把限速吞掉了。
+   ============================================================================ */
+#define VISION_PARK2_FULL_SPEED    0U
 
 typedef enum
 {
   VISION_TASK_IDLE = 0,
   VISION_TASK_TURN_LEFT,
   VISION_TASK_TURN_RIGHT,
-  VISION_TASK_HORN,
+  /* 鸣笛不再是任务（不占底盘），所以这里没有 VISION_TASK_HORN。 */
   VISION_TASK_PARK_1,
   VISION_TASK_PARK_2,
   VISION_TASK_STOPPED
@@ -63,7 +82,14 @@ uint8_t VisionTask_Begin(Event_Type type);
  */
 uint8_t VisionTask_Step(void);
 
-/* 放弃当前任务并制动。急停时由调度器调用。 */
+/*
+ * 推进鸣笛节奏。**每轮主循环都要调**，与控制模式无关——鸣笛不占底盘，所以它
+ * 不能挂在 VisionTask_Step() 里（那个只在 CONTROL_TASK 模式下被调用）。
+ * 没有在鸣笛时是空操作。
+ */
+void VisionTask_StepHorn(void);
+
+/* 放弃当前任务并制动。急停时由调度器调用。鸣笛也一并停掉。 */
 void VisionTask_Cancel(void);
 
 uint8_t VisionTask_IsBusy(void);

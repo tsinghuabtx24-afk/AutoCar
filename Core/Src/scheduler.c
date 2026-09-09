@@ -217,6 +217,14 @@ void Scheduler_OnEvent(const Event *e)
   /* ---- 视觉事件 ---- */
   if (Scheduler_IsVisionEvent(e->type) != 0U)
   {
+    /* 只要**识别到**就亮绿灯 1s，到期由指示层自动撤销。
+       故意放在门控之前：需求是"识别到就亮"，所以被 vision_nav 的门控或去重
+       挡掉的识别同样要亮——那也是识别到了，只是不执行动作。
+       优先级最低，入库闪灯/避障告警/急停都会盖住它。 */
+    Indicator_RequestTimed(INDICATOR_PRIO_VISION, INDICATOR_BUZZER_OFF,
+                           INDICATOR_VISION_COLOR, INDICATOR_VISION_COLOR,
+                           0U, INDICATOR_VISION_HOLD_MS);
+
     /* 先过视觉导航的门控：门没开一律丢弃；左/右转信号被转成内部两段式
        机动，同样不在这里执行。返回 1 才是"该照常执行"的事件。 */
     if (VisionNav_OnVisionEvent(e->type) == 0U)

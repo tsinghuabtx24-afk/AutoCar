@@ -28,6 +28,7 @@ extern "C" {
 typedef enum
 {
   INDICATOR_PRIO_NONE = 0,
+  INDICATOR_PRIO_VISION,   /* 识别到视觉标志的绿灯提示，1s 后自动撤销 */
   INDICATOR_PRIO_TASK,     /* 入库闪灯、鸣笛 */
   INDICATOR_PRIO_MANUAL,   /* 遥控手动接管提示 */
   INDICATOR_PRIO_AVOID,    /* 避障告警 */
@@ -55,6 +56,19 @@ typedef enum
 #define INDICATOR_BEEP_ON_MS      120U
 #define INDICATOR_BEEP_GAP_MS     100U
 
+/* ==== 视觉识别提示 ==========================================================
+   识别到**任何**视觉标志就亮这个颜色这么久，到期自动撤销，不鸣笛。
+
+   优先级取最低（INDICATOR_PRIO_VISION）：入库闪灯、避障告警、急停都比它重要，
+   同时亮的时候让那些盖住它。所以这个提示是"没别的事时才看得到"。
+
+   ⚠️ 左侧 RGB 的 R/G 引脚在 main.h 里命名与实物相反，indicator.c 的
+      Indicator_WriteLeft() 已按引脚名做了补偿。若实车看到左右颜色不一致，
+      改那个函数，不要改这里的颜色宏。
+   ============================================================================ */
+#define INDICATOR_VISION_COLOR    INDICATOR_GREEN
+#define INDICATOR_VISION_HOLD_MS  1000U
+
 /* buzzer 参数的取值。持续鸣叫用 INDICATOR_BUZZER_ON，
    叫固定几声后自动静音用 INDICATOR_BEEPS(n)。 */
 #define INDICATOR_BUZZER_OFF      0U
@@ -78,6 +92,18 @@ void Indicator_Init(void);
 void Indicator_Request(Indicator_Prio prio, uint8_t buzzer,
                        Indicator_Color left, Indicator_Color right,
                        uint16_t blink_ms);
+
+/*
+ * 同上，但 hold_ms 毫秒后**自动撤销**，调用方不必自己记时间去 Release。
+ * hold_ms 为 0 时等价于 Indicator_Request()（一直有效直到显式 Release）。
+ *
+ * 与 Indicator_Request() 的另一个区别：重复提交相同参数会**刷新计时**而不是被
+ * 当作"续订"忽略。这正是"每次识别到就重新亮 1s"想要的行为；点鸣计数不受影响，
+ * 所以不会把蜂鸣器重置成第一声。
+ */
+void Indicator_RequestTimed(Indicator_Prio prio, uint8_t buzzer,
+                            Indicator_Color left, Indicator_Color right,
+                            uint16_t blink_ms, uint16_t hold_ms);
 
 /* 撤销某优先级的申请。 */
 void Indicator_Release(Indicator_Prio prio);
