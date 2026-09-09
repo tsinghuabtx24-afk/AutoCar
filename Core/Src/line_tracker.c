@@ -36,6 +36,8 @@ _Static_assert(LINE_EDGE_WHITE_COUNT >= 1U,
 _Static_assert(LINE_BACKUP_MODE <= 2U,
                "LINE_BACKUP_MODE must be 0 (off), 1 (by distance) or "
                "2 (by time)");
+_Static_assert(LINE_BACKUP_ON_LEVEL3 <= 1U,
+               "LINE_BACKUP_ON_LEVEL3 must be 0 or 1");
 #if LINE_BACKUP_MODE != 0U
 /* 退不动就等于没退，而且 car 会直接返回 FAILED。 */
 _Static_assert(LINE_BACKUP_SPEED > CAR_SPEED_BASE,
@@ -80,8 +82,11 @@ static int32_t  line_turn_start_deg10;
 /* ---- 空窗改判后的后退相位 ----
    后退期间四路仍然全白，方向没法从当前图案再算一次，所以发起后退时就把
    "退完要往哪转"记下来。 */
-static int8_t   line_backup_dir;     /* +1 退完向左转，-1 向右转 */
-static uint32_t line_backup_tick;    /* 后退起始 tick，喂看门狗 */
+static int8_t   line_backup_dir;      /* +1 退完向左转，-1 向右转 */
+static uint32_t line_backup_tick;     /* 后退起始 tick，喂看门狗 */
+/* 上一次后退**结束**的 tick，喂 LINE_BACKUP_COOLDOWN_MS。被冷却挡掉的那次
+   不更新它，否则持续振荡会把冷却无限续下去。 */
+static uint32_t line_backup_done_tick;
 
 /* ---- 偏离图案（0001/1000/0011/1100）的观察窗 ----
    见 line_tracker.h。看到这些图案时开窗，窗口内数全白次数，够多就改判原地转。 */
@@ -168,6 +173,12 @@ void LineTracker_Reset(void)
   }
 
   LineTracker_EdgeWatchCancel();
+
+  /* 冷却置为"已过期"，让恢复控制权后的第一次原地转能正常后退。不这样做的话
+     开机后头 LINE_BACKUP_COOLDOWN_MS 内的急弯会被冷却白挡一次。
+     无符号回绕算术，HAL_GetTick() 小于冷却值时结果依然正确。 */
+  line_backup_done_tick =
+      HAL_GetTick() - (uint32_t)LINE_BACKUP_COOLDOWN_MS;
 
   line_mode        = LINE_MODE_DIFF;
   line_backup_dir  = 0;
@@ -381,6 +392,19 @@ static void LineTracker_EnterBackupThenPivot(int8_t level)
   int8_t           dir = (level > 0) ? 1 : -1;
   Car_ActionStatus st;
 
+  /* ---- 冷却检查：距上次后退太近就跳过后退，直接转 ----
+     原地转**不产生前进位移**，所以"退一段→转→又偏到 3 档→再退一段"这个振荡
+     每轮净往后走一次后退的距离，车会一路倒着退出赛道。冷却让振荡最多只吃到
+     第一次后退。挡掉的这次不刷新 line_backup_done_tick，否则冷却会被无限续。 */
+  if ((uint32_t)(HAL_GetTick() - line_backup_done_tick) <
+      (uint32_t)LINE_BACKUP_COOLDOWN_MS)
+  {
+    printf("[LINE] backup on cooldown, pivot directly\r\n");
+    LineTracker_EnterPivot(level);
+    LineTracker_DrivePivot();
+    return;
+  }
+
   /* 已经在转的话观察窗没意义了；顺手清掉，和 EnterPivot 保持一致。 */
   LineTracker_EdgeWatchCancel();
 
@@ -503,6 +527,9 @@ void LineTracker_Step(void)
     {
       printf("[LINE] backup ended abnormally (%d)\r\n", (int)st);
     }
+
+    /* 后退到此结束，冷却从这一刻起算。 */
+    line_backup_done_tick = now;
 
     /* 退得好不好都要转：后退是为了提高成功率，不是原地转的前置条件。
        PIVOT 的超时也从这一刻重新起算，后退耗时不占额度。 */
@@ -634,8 +661,15 @@ void LineTracker_Step(void)
   /* ---- 3 档极偏：切原地转；其余走差速 ---- */
   if ((level >= 3) || (level <= -3))
   {
+#if LINE_BACKUP_ON_LEVEL3
+    /* 与观察窗改判共用同一套后退逻辑（含冷却与看门狗）。0111/1110 虽然还压着
+       最外侧一路，但走到 3 档说明车身已经斜得很厉害，退一段再转同样更容易
+       把旋转中心拉回线上。 */
+    LineTracker_EnterBackupThenPivot(level);
+#else
     LineTracker_EnterPivot(level);
     LineTracker_DrivePivot();
+#endif
     return;
   }
 
