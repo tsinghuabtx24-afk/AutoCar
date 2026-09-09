@@ -37,6 +37,7 @@ typedef enum
 {
   LINE_MODE_DIFF = 0,       /* 差速连续修正 */
   LINE_MODE_PIVOT,          /* 大偏差原地转，边转边看传感器 */
+  LINE_MODE_FORK_TURN,      /* 岔道规则的定角 90° 旋转 */
   LINE_MODE_LOST            /* 判定丢线，已制动 */
 } LineTracker_Mode;
 
@@ -60,12 +61,13 @@ static uint8_t  line_edge_white;      /* 窗口内累计的全白次数 */
 /* 黑线暂停：连续全黑计数、暂停起始时刻、是否允许再次触发 */
 static uint8_t  line_black_count;
 static uint32_t line_black_pause_tick;   /* 0 = 不在暂停中 */
+static uint32_t line_black_creep_tick;   /* 0 = 不在暂停后的强制直行中 */
 static uint8_t  line_black_armed;
 
-/* 补给岔道规则：0=未武装，1=已武装等全黑，2=见过全黑等全白 */
+/* 补给岔道规则。
+   stage: 0=未武装/已完成，1=等非全白去抖，2=等全白（命中即左转并结束） */
 static uint8_t  line_fork_stage;
-static uint32_t line_fork_arm_tick;   /* 武装时刻，用于总超时 */
-static uint32_t line_fork_black_tick; /* 见到全黑的时刻，用于等白时限 */
+static uint32_t line_fork_turn_tick;    /* 定角旋转起始时刻，用于兜底超时 */
 
 static void LineTracker_EdgeWatchCancel(void);
 
@@ -126,6 +128,13 @@ uint8_t LineTracker_GetBaseSpeed(void) { return line_base_speed; }
 
 void LineTracker_Reset(void)
 {
+  /* 若在岔道定角旋转途中被抢占，car 里还挂着未结束的动作。不清的话下一个
+     发起定角动作的模块会被 Car_ActionBegin() 拒掉。 */
+  if (line_mode == LINE_MODE_FORK_TURN)
+  {
+    Car_ActionAbort();
+  }
+
   LineTracker_EdgeWatchCancel();
 
   line_mode        = LINE_MODE_DIFF;
@@ -139,6 +148,7 @@ void LineTracker_Reset(void)
      armed 置 1 = 恢复后遇到下一片黑区可以正常再停一次。 */
   line_black_count      = 0U;
   line_black_pause_tick = 0U;
+  line_black_creep_tick = 0U;
   line_black_armed      = 1U;
 
   /* 基础速度**不重置**：限速是持续配置，被避障打断后应该保持，
@@ -153,9 +163,8 @@ void LineTracker_Reset(void)
 void LineTracker_Init(void)
 {
   /* Reset() 有意不清岔道状态（见其中注释），所以上电初值在这里给。 */
-  line_fork_stage      = 0U;
-  line_fork_arm_tick   = 0U;
-  line_fork_black_tick = 0U;
+  line_fork_stage        = 0U;
+  line_fork_turn_tick    = 0U;
 
   LineTracker_Reset();
   Car_Stop();
@@ -313,17 +322,17 @@ static uint8_t LineTracker_EdgeWatchStep(uint8_t pattern, int8_t *level)
   */
 void LineTracker_ArmForkLeft(void)
 {
-  line_fork_stage      = 1U;
-  line_fork_arm_tick   = HAL_GetTick();
-  line_fork_black_tick = 0U;
-  printf("[LINE] fork-left armed\r\n");
+  /* 从 stage 1 起：先要读到一次非全白才开始响应。掉头结束时车可能正悬在
+     白区上，直接进 stage 2 会当场触发。 */
+  line_fork_stage        = 1U;
+  printf("[LINE] fork armed: white -> turn left 90\r\n");
 }
 
 void LineTracker_DisarmForkLeft(void)
 {
   if (line_fork_stage != 0U)
   {
-    printf("[LINE] fork-left disarmed\r\n");
+    printf("[LINE] fork disarmed before triggering\r\n");
   }
   line_fork_stage = 0U;
 }
@@ -333,55 +342,73 @@ uint8_t LineTracker_IsForkArmed(void)
   return (uint8_t)((line_fork_stage != 0U) ? 1U : 0U);
 }
 
-/**
-  * @brief  推进岔道规则的两段判定
-  * @param  pattern 本周期图案
-  * @param  now     当前 tick
-  * @retval 1=此刻应当左转，0=不动作
-  */
-static uint8_t LineTracker_ForkStep(uint8_t pattern, uint32_t now)
+uint8_t LineTracker_IsBlackCreeping(void)
 {
+  return (uint8_t)((line_black_creep_tick != 0U) ? 1U : 0U);
+}
+
+/**
+  * @brief  推进岔道规则：全白 → 原地左转 90°，一次做完即结束
+  * @param  pattern 本周期图案
+  * @retval 1=此刻应当左转 90°，0=不动作
+  */
+static uint8_t LineTracker_ForkStep(uint8_t pattern)
+{
+  uint8_t is_white = (uint8_t)((pattern == LINE_PATTERN_ALL_WHITE) ? 1U : 0U);
+
   if (line_fork_stage == 0U)
   {
     return 0U;
   }
 
-  /* 总超时：挂太久说明这趟没碰到岔道，别一直等着。 */
-  if ((uint32_t)(now - line_fork_arm_tick) >= LINE_FORK_ARM_TIMEOUT_MS)
-  {
-    printf("[LINE] fork-left timeout, disarm\r\n");
-    line_fork_stage = 0U;
-    return 0U;
-  }
-
+  /* stage 1：去抖。武装后先要离开白区才开始等全白——掉头结束时车可能正悬在
+     白区上，直接进 stage 2 会当场触发。 */
   if (line_fork_stage == 1U)
   {
-    /* 等岔道口的全黑。 */
-    if (pattern == LINE_PATTERN_ALL_BLACK)
+    if (is_white == 0U)
     {
-      line_fork_stage      = 2U;
-      line_fork_black_tick = now;
-      printf("[LINE] fork-left: all-black seen, waiting white\r\n");
+      line_fork_stage = 2U;
     }
     return 0U;
   }
 
-  /* stage 2：见过全黑，等全白。 */
-  if (pattern == LINE_PATTERN_ALL_WHITE)
+  /* stage 2：等全白。 */
+  if (is_white == 0U)
   {
-    printf("[LINE] fork-left: white after black -> pivot left\r\n");
-    line_fork_stage = 0U;    /* 一次性，转完不再触发 */
-    return 1U;
+    return 0U;
   }
 
-  /* 等白超时：这次全黑不是岔道口，退回等下一次全黑。
-     不直接解除武装——真正的岔道可能还在后面。 */
-  if ((uint32_t)(now - line_fork_black_tick) >= LINE_FORK_WHITE_WAIT_MS)
+  /* 命中：左转一次，规则结束。 */
+  line_fork_stage = 0U;
+  printf("[LINE] fork: white -> turn left 90, rule done\r\n");
+  return 1U;
+}
+
+/**
+  * @brief  发起岔道规则的定角旋转
+  * @param  dir +1 = 左转，-1 = 右转
+  * @retval 1=已发起（调用方应 return），0=car 拒绝，按普通循迹继续
+  */
+static uint8_t LineTracker_StartForkTurn(int8_t dir)
+{
+  int32_t deg10 = (int32_t)dir * (int32_t)LINE_FORK_TURN_DEG10;
+
+  /* 循迹平时用的是瞬时速度接口，这里确保没有残留的定角动作。 */
+  Car_ActionAbort();
+
+  if (Car_StartRotateAngle(LINE_FORK_TURN_SPEED, deg10) != CAR_ACTION_BUSY)
   {
-    line_fork_stage = 1U;
-    printf("[LINE] fork-left: white wait expired, rearm for black\r\n");
+    printf("[LINE] fork turn rejected\r\n");
+    return 0U;
   }
-  return 0U;
+
+  /* 旋转期间 Step 会提前 return，观察窗推不动；转完姿态已变，窗口前提
+     （正在跟线做微偏修正）不再成立，直接作废。 */
+  LineTracker_EdgeWatchCancel();
+
+  line_fork_turn_tick = HAL_GetTick();
+  line_mode           = LINE_MODE_FORK_TURN;
+  return 1U;
 }
 
 static void LineTracker_EnterPivot(int8_t level)
@@ -417,7 +444,7 @@ static void LineTracker_DrivePivot(void)
   */
 static uint8_t LineTracker_BlackPauseStep(uint8_t pattern, uint32_t now)
 {
-  /* 暂停进行中：停够就放行，并保持闩锁（离开黑区才会重新武装）。 */
+  /* 暂停进行中：停够就转入强制直行，并保持闩锁（离开黑区才会重新武装）。 */
   if (line_black_pause_tick != 0U)
   {
     if ((uint32_t)(now - line_black_pause_tick) < LINE_BLACK_PAUSE_MS)
@@ -427,8 +454,22 @@ static uint8_t LineTracker_BlackPauseStep(uint8_t pattern, uint32_t now)
     }
     line_black_pause_tick = 0U;
     line_black_count      = 0U;
-    printf("[LINE] black pause done, resume at base %u\r\n",
-           (unsigned)line_base_speed);
+    line_black_creep_tick = (now != 0U) ? now : 1U;
+    printf("[LINE] black pause done, creep %u ms at base %u\r\n",
+           (unsigned)LINE_BLACK_CREEP_MS, (unsigned)line_base_speed);
+    /* 落到下面的直行段，本周期就开始挪。 */
+  }
+
+  /* 强制直行：挪出黑区再交给正常循迹。用瞬时接口，不占 car 动作。 */
+  if (line_black_creep_tick != 0U)
+  {
+    if ((uint32_t)(now - line_black_creep_tick) < LINE_BLACK_CREEP_MS)
+    {
+      Car_ForwardRun(line_base_speed);
+      return 1U;
+    }
+    line_black_creep_tick = 0U;
+    printf("[LINE] black creep done, back to line track\r\n");
     /* 不 return：本周期直接按当前图案继续循迹，不浪费一个周期。 */
   }
 
@@ -526,17 +567,41 @@ void LineTracker_Step(void)
     }
   }
 
-  /* ---- 补给岔道规则：全黑 → 全白 → 原地左转 ----
-     必须放在紧接着的全黑/全白两段之前，那两段都会 return，
-     放后面就永远看不到它要等的图案。
-
-     也必须排在黑线暂停**之前**：暂停期间 Step 会提前 return，岔道规则推不动。
-     顺序反过来的话那次全黑会被暂停吃掉，岔道永远停在"等全黑"。 */
-  if (LineTracker_ForkStep(pattern, now) != 0U)
+  /* ---- 补给岔道规则：全白 → 原地左转 90°，一次做完即结束 ----
+     必须放在下面全白判定**之前**：那一段会 return，放后面就永远看不到全白。 */
+  if (LineTracker_ForkStep(pattern) != 0U)
   {
-    line_lost_count = 0U;      /* 岔道口的全白是预期的，不算丢线 */
-    LineTracker_EnterPivot(1); /* level>0 = 向左 */
-    LineTracker_DrivePivot();
+    line_lost_count = 0U;   /* 触发用的全白是预期的，不算丢线 */
+
+    if (LineTracker_StartForkTurn(1) != 0U)   /* dir=+1 向左 */
+    {
+      return;
+    }
+    /* 发起失败就当没触发，落到后面按普通循迹处理。 */
+  }
+
+  /* ---- 岔道定角旋转进行中：推进动作，转完交回差速 ---- */
+  if (line_mode == LINE_MODE_FORK_TURN)
+  {
+    Car_ActionStatus st = Car_ActionStep();
+
+    if (st == CAR_ACTION_BUSY)
+    {
+      if ((uint32_t)(now - line_fork_turn_tick) < LINE_FORK_TURN_TIMEOUT_MS)
+      {
+        return;
+      }
+      printf("[LINE] fork turn timeout\r\n");
+      Car_ActionAbort();
+    }
+    else if (st != CAR_ACTION_DONE)
+    {
+      printf("[LINE] fork turn ended abnormally (%d)\r\n", (int)st);
+    }
+
+    /* 转完不判断有没有压上线：找线交给下面的正常循迹，真丢线才走丢线保护。 */
+    line_mode       = LINE_MODE_DIFF;
+    line_lost_count = 0U;
     return;
   }
 

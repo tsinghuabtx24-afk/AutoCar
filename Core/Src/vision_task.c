@@ -353,6 +353,8 @@ uint8_t VisionTask_Begin(Event_Type type)
       warehouse_phase = 0U;
       warehouse_fwd_ms = 0U;
       warehouse_sample_tick = HAL_GetTick();
+      /* 岔道左转规则的统一解除点：从补给掉头一直武装到这里，之后不再左转。 */
+      LineTracker_DisarmForkLeft();
       VisionTask_Start(VISION_TASK_WAREHOUSE);
       return 1U;
 

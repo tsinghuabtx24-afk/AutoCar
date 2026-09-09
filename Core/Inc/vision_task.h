@@ -10,12 +10,12 @@ extern "C" {
 #include "event.h"
 
 /* ==== 速度配置 ============================================================== */
-#define VISION_SPEED_NORMAL        64U
-#define VISION_SPEED_LIMIT_DROP    4U
+#define VISION_SPEED_NORMAL        70U
+#define VISION_SPEED_LIMIT_DROP    5U
 
 /* 转向：原地旋转90.0°，单位0.1度。 */
 #define VISION_TURN_SPEED          80U
-#define VISION_TURN_ANGLE_DEG10    900U
+#define VISION_TURN_ANGLE_DEG10    850U
 
 /* ==== 信号类动作 ============================================================ */
 #define VISION_TUNNEL_LIGHT_MS     4000U
@@ -44,8 +44,8 @@ extern "C" {
 #define VISION_FRIENDLY_TIMEOUT_MS  5000U
 
 /* ==== 禁止通行 ============================================================== */
-#define VISION_NO_ENTRY_BACK_MS    500U    /* 倒车时间 */
-#define VISION_NO_ENTRY_FWD_MS     100U    /* 前进时间 */
+#define VISION_NO_ENTRY_BACK_MS    100U    /* 倒车时间 */
+#define VISION_NO_ENTRY_FWD_MS     0U    /* 前进时间 */
 
 /* ==== 仓库动作 ==============================================================
    流程：左转90° → 直行（时长记为 x）→ 连续 8 个采样周期全白(0000) → 停 3s
@@ -74,7 +74,7 @@ extern "C" {
    在转完之前（最坏 5s）不出 Scheduler_OnEvent，期间事件队列不消费、循迹不
    推进、避障不响应，连急停键都进不来。
    ============================================================================ */
-#define VISION_TURN_AROUND_DEG10       1800U   /* 掉头角度，单位0.1° */
+#define VISION_TURN_AROUND_DEG10       1600U   /* 掉头角度，单位0.1° */
 #define VISION_TURN_AROUND_TIMEOUT_MS  5000U   /* 编码器不到位时的兜底 */
 
 /* ==== 呼唤友军（遥控"9"）====================================================

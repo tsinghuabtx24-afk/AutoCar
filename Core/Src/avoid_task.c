@@ -70,20 +70,19 @@ typedef struct
 
 static const AvoidTask_DetourStep avoid_detour[] =
 {
-  { -(int32_t)AVOID_DETOUR_TURN_DEG10, 0U,                    NULL          },
-  { 0,                                 AVOID_DETOUR_LONG_MM,  "forward 300" },
-  {  (int32_t)AVOID_DETOUR_TURN_DEG10, 0U,                    NULL          },
-  { 0,                                 AVOID_DETOUR_CROSS_MM, "forward 500" },
-  {  (int32_t)AVOID_DETOUR_TURN_DEG10, 0U,                    NULL          },
-  { 0,                                 AVOID_DETOUR_LONG_MM,  "forward 300" },
-  { -(int32_t)AVOID_DETOUR_TURN_DEG10, 0U,                    NULL          },
+  { -(int32_t)AVOID_DETOUR_TURN_DEG10, 0U,                  NULL          },
+  { 0,                                 AVOID_DETOUR_LEG_MM, "forward 200" },
+  {  (int32_t)AVOID_DETOUR_TURN_DEG10, 0U,                  NULL          },
+  { 0,                                 AVOID_DETOUR_LEG_MM, "forward 200" },
+  { -(int32_t)AVOID_DETOUR_TURN_DEG10, 0U,                  NULL          },
 };
 
 #define AVOID_DETOUR_STEPS  (sizeof(avoid_detour) / sizeof(avoid_detour[0]))
 
-/* 序列必须回到原朝向、原横向位置，否则绕完接不回原来那条线。
-   两次右转 + 两次左转，代数和为 0；两段 400mm 长度相同，横向偏出恰好抵消。 */
-_Static_assert(AVOID_DETOUR_STEPS == 7U, "detour sequence must have 7 steps");
+/* 右转90 → 前进200 → 左转90 → 前进200 → 右转90。
+   旋转代数和 = -90 +90 -90 = -90，绕完车头垂直于原方向（见 avoid_task.h 的
+   几何说明）。交还控制权后由循迹重新找线。 */
+_Static_assert(AVOID_DETOUR_STEPS == 5U, "detour sequence must have 5 steps");
 
 /**
   * @brief  发起绕行序列的第 step 步
@@ -123,7 +122,7 @@ static uint8_t AvoidTask_StartDetourStep(uint8_t step)
   printf("[AVOID] detour step %u/%u: %s\r\n",
          (unsigned)(step + 1U), (unsigned)AVOID_DETOUR_STEPS,
          (turn != 0)
-           ? ((turn > 0) ? "turn left 60" : "turn right 60")
+           ? ((turn > 0) ? "turn left 90" : "turn right 90")
            : s->name);
   return 1U;
 }
