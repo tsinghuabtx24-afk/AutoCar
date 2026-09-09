@@ -33,10 +33,34 @@ _Static_assert(LINE_EDGE_WHITE_COUNT <= LINE_EDGE_WATCH_CYCLES,
 _Static_assert(LINE_EDGE_WHITE_COUNT >= 1U,
                "LINE_EDGE_WHITE_COUNT must be at least 1");
 
+_Static_assert(LINE_BACKUP_MODE <= 2U,
+               "LINE_BACKUP_MODE must be 0 (off), 1 (by distance) or "
+               "2 (by time)");
+#if LINE_BACKUP_MODE != 0U
+/* 退不动就等于没退，而且 car 会直接返回 FAILED。 */
+_Static_assert(LINE_BACKUP_SPEED > CAR_SPEED_BASE,
+               "LINE_BACKUP_SPEED is inside the motor dead zone: the car "
+               "would not move at all");
+_Static_assert(LINE_BACKUP_SPEED <= MOTOR_SPEED_MAX,
+               "LINE_BACKUP_SPEED exceeds MOTOR_SPEED_MAX");
+#endif
+#if LINE_BACKUP_MODE == 1U
+/* 距离为 0 时 car 判参数非法。 */
+_Static_assert(LINE_BACKUP_DIST_MM >= 1U,
+               "LINE_BACKUP_DIST_MM must be at least 1mm");
+#elif LINE_BACKUP_MODE == 2U
+_Static_assert(LINE_BACKUP_TIME_MS >= 1U,
+               "LINE_BACKUP_TIME_MS must be at least 1ms");
+_Static_assert(LINE_BACKUP_TIME_MS < LINE_BACKUP_GUARD_MS,
+               "LINE_BACKUP_GUARD_MS must exceed LINE_BACKUP_TIME_MS or the "
+               "watchdog would fire before the backup can finish");
+#endif
+
 /* 循迹内部状态。原地转是一个持续若干周期的相位，需要记住方向。 */
 typedef enum
 {
   LINE_MODE_DIFF = 0,       /* 差速连续修正 */
+  LINE_MODE_BACKUP,         /* 空窗改判后的后退，退完接 PIVOT */
   LINE_MODE_PIVOT,          /* 大偏差原地转，边转边看传感器 */
   LINE_MODE_VISION_TURN,    /* 视觉导航的定角旋转（vision_nav 发起） */
   LINE_MODE_LOST            /* 判定丢线，已制动 */
@@ -52,6 +76,12 @@ static uint16_t line_lost_count;
 static uint8_t  line_base_speed = LINE_BASE_SPEED;
 /* 视觉旋转的起始编码器角度快照，用于打印实测转角供标定。 */
 static int32_t  line_turn_start_deg10;
+
+/* ---- 空窗改判后的后退相位 ----
+   后退期间四路仍然全白，方向没法从当前图案再算一次，所以发起后退时就把
+   "退完要往哪转"记下来。 */
+static int8_t   line_backup_dir;     /* +1 退完向左转，-1 向右转 */
+static uint32_t line_backup_tick;    /* 后退起始 tick，喂看门狗 */
 
 /* ---- 偏离图案（0001/1000/0011/1100）的观察窗 ----
    见 line_tracker.h。看到这些图案时开窗，窗口内数全白次数，够多就改判原地转。 */
@@ -129,9 +159,18 @@ void LineTracker_Reset(void)
     VisionNav_Reset();
   }
 
+  /* 后退相位途中被抢占：必须显式放弃 car 的动作，否则状态机还被占着，
+     后面 Car_StartRotateAngle()/Car_StartBackwardDistance() 都会被拒。
+     抢占方通常已经 Car_ActionAbort() 过，这里再来一次是幂等的。 */
+  if (line_mode == LINE_MODE_BACKUP)
+  {
+    Car_ActionAbort();
+  }
+
   LineTracker_EdgeWatchCancel();
 
   line_mode        = LINE_MODE_DIFF;
+  line_backup_dir  = 0;
   line_pivot_dir   = 0;
   line_lost_count  = 0U;
   line_last_pattern = 0xFFU;
@@ -322,6 +361,56 @@ static void LineTracker_DrivePivot(void)
 }
 
 /**
+  * @brief  空窗改判后先退一段，退完再原地转
+  * @param  level: 改判给出的档位，符号即退完要转的方向
+  *
+  * @note   与 pivot 不同，后退用的是 car 的**非阻塞动作状态机**而不是瞬时接口：
+  *         要的是"退够 20mm/100ms 就停"这种有终点的动作，瞬时接口没有终点。
+  *         代价是后退期间要独占 car 的动作状态机，所以先 Abort 一次。
+  *
+  *         退不动不是致命错误：发起失败就退化成原来的"立即转"，不能因为退不了
+  *         就放弃这次改判——那会让急弯彻底没人管。
+  */
+static void LineTracker_EnterBackupThenPivot(int8_t level)
+{
+#if LINE_BACKUP_MODE == 0U
+  /* 后退关闭：保持旧行为，方便和开启后做 A/B 对比。 */
+  LineTracker_EnterPivot(level);
+  LineTracker_DrivePivot();
+#else
+  int8_t           dir = (level > 0) ? 1 : -1;
+  Car_ActionStatus st;
+
+  /* 已经在转的话观察窗没意义了；顺手清掉，和 EnterPivot 保持一致。 */
+  LineTracker_EdgeWatchCancel();
+
+  /* 循迹平时只用瞬时接口，动作状态机理论上是空的。但视觉旋转刚异常结束等
+     情况下可能有残留，不 Abort 会让下面的 Start 直接被拒。 */
+  Car_ActionAbort();
+
+#if LINE_BACKUP_MODE == 1U
+  st = Car_StartBackwardDistance(LINE_BACKUP_SPEED, LINE_BACKUP_DIST_MM);
+#else
+  st = Car_StartTimed(-(int16_t)LINE_BACKUP_SPEED,
+                      -(int16_t)LINE_BACKUP_SPEED, LINE_BACKUP_TIME_MS);
+#endif
+
+  if (st != CAR_ACTION_BUSY)
+  {
+    printf("[LINE] backup rejected (%d), pivot directly\r\n", (int)st);
+    LineTracker_EnterPivot(level);
+    LineTracker_DrivePivot();
+    return;
+  }
+
+  line_backup_dir  = dir;
+  line_backup_tick = HAL_GetTick();
+  line_mode        = LINE_MODE_BACKUP;
+  printf("[LINE] backup then pivot %s\r\n", (dir > 0) ? "left" : "right");
+#endif
+}
+
+/**
   * @brief  判定丢线并制动
   */
 static void LineTracker_EnterLost(void)
@@ -393,6 +482,35 @@ void LineTracker_Step(void)
     return;
   }
 
+  /* ---- 后退相位进行中：退完接原地转 ----
+     放在视觉旋转之后、视觉旋转请求之前。后退只有 100ms 量级，让它走完比被视觉
+     抢断再重来更简单，也保证 line_backup_dir 一定有人消费、不会悬着。 */
+  if (line_mode == LINE_MODE_BACKUP)
+  {
+    Car_ActionStatus st = Car_ActionStep();
+
+    if (st == CAR_ACTION_BUSY)
+    {
+      if ((uint32_t)(now - line_backup_tick) < LINE_BACKUP_GUARD_MS)
+      {
+        return;
+      }
+      /* 轮子被卡住之类：不能一直等 car 那个 60s 的兜底超时。 */
+      printf("[LINE] backup guard timeout, pivot anyway\r\n");
+      Car_ActionAbort();
+    }
+    else if (st != CAR_ACTION_DONE)
+    {
+      printf("[LINE] backup ended abnormally (%d)\r\n", (int)st);
+    }
+
+    /* 退得好不好都要转：后退是为了提高成功率，不是原地转的前置条件。
+       PIVOT 的超时也从这一刻重新起算，后退耗时不占额度。 */
+    LineTracker_EnterPivot((int8_t)(line_backup_dir * 3));
+    LineTracker_DrivePivot();
+    return;
+  }
+
   /* ---- 视觉导航要求旋转：让位给定角动作 ----
      放在丢线判定之前：旋转触发图案里包含全黑，而全黑不参与丢线计数，
      两者不冲突。 */
@@ -430,8 +548,9 @@ void LineTracker_Step(void)
         (line_mode == LINE_MODE_DIFF))
     {
       line_lost_count = 0U;   /* 转弯中四路离线是正常的，不算丢线 */
-      LineTracker_EnterPivot(esc_level);
-      LineTracker_DrivePivot();
+      /* 改判这条路径先退再转：走到这里说明车已经冲过弯道入口，转轴在线外。
+         3 档极偏（下面那条路径）不走后退，它本来还压着线。 */
+      LineTracker_EnterBackupThenPivot(esc_level);
       return;
     }
   }
