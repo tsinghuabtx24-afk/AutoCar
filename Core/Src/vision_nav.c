@@ -194,13 +194,17 @@ void VisionNav_OnPattern(uint8_t pattern)
 }
 
 /**
-  * @brief  当前图案是否构成旋转触发
+  * @brief  当前图案是否构成本段机动的旋转触发
+  * @param  state   必须是 VNAV_TURN_1_WAIT 或 VNAV_TURN_2_WAIT
+  * @note   两段的触发图案不同：第一段等全白，第二段等全黑。所以判定必须带上
+  *         状态，不能像原来那样用一张公共图案表。
   */
-static uint8_t VisionNav_IsTriggerPattern(uint8_t pattern)
+static uint8_t VisionNav_IsTriggerPattern(VisionNav_State state,
+                                          uint8_t pattern)
 {
-  return (uint8_t)((pattern == VNAV_PATTERN_ALL_BLACK) ||
-                   (pattern == VNAV_PATTERN_RIGHT_EDGE) ||
-                   (pattern == VNAV_PATTERN_LEFT_EDGE));
+  uint8_t want = (state == VNAV_TURN_1_WAIT) ? (uint8_t)VNAV_TRIGGER_1
+                                             : (uint8_t)VNAV_TRIGGER_2;
+  return (uint8_t)((pattern == want) ? 1U : 0U);
 }
 
 uint8_t VisionNav_TakeTurnRequest(int32_t *deg10)
@@ -221,23 +225,15 @@ uint8_t VisionNav_TakeTurnRequest(int32_t *deg10)
 
   /* 图案由 line_tracker 在同一周期内先调 OnPattern() 存进来。 */
   pattern = vnav_last_pattern;
-  if (VisionNav_IsTriggerPattern(pattern) == 0U)
+  if (VisionNav_IsTriggerPattern(vnav_state, pattern) == 0U)
   {
     return 0U;
   }
 
-  if (vnav_state == VNAV_TURN_1_WAIT)
-  {
-    /* 第一次：向视觉给出的方向转。 */
-    *deg10 = (int32_t)vnav_turn_dir * (int32_t)VNAV_TURN_DEG10;
-    VisionNav_Enter(VNAV_TURN_1_RUN);
-  }
-  else
-  {
-    /* 第二次：正向，在绕弯半圈后把车头转回原朝向。 */
-    *deg10 = (int32_t)vnav_turn_dir * (int32_t)VNAV_TURN_DEG10;
-    VisionNav_Enter(VNAV_TURN_2_RUN);
-  }
+  /* 两段同向同角度：第一段在全白处转，第二段在全黑处再转一次。 */
+  *deg10 = (int32_t)vnav_turn_dir * (int32_t)VNAV_TURN_DEG10;
+  VisionNav_Enter((vnav_state == VNAV_TURN_1_WAIT) ? VNAV_TURN_1_RUN
+                                                   : VNAV_TURN_2_RUN);
 
   printf("[VNAV] turn request %ld deg10 (pattern 0x%02X)\r\n",
          (long)*deg10, (unsigned)pattern);
