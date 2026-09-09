@@ -38,7 +38,7 @@ void UltrasonicSense_Restart(void)
   * @brief  推进超声波采样，只产生事件
   * @note   全程非阻塞：到周期就发起一次测距，之后每轮推进状态机，回波到了
   *         才判阈值。原实现调阻塞版 Ultrasonic_ReadMm()，空旷无回波时会卡
-  *         35ms，循迹的 10ms 控制周期被整整拖过三轮。
+  *         35ms，循迹的 5ms 控制周期被整整拖过七轮。
   */
 void UltrasonicSense_Sense(void)
 {

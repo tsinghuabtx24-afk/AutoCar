@@ -295,7 +295,8 @@ void Scheduler_Dispatch(void)
       break;
 
     case CONTROL_LINE_TRACK:
-      /* 默认行为：差速循迹。非阻塞，内部自己把住 10ms 控制周期。 */
+      /* 默认行为：差速循迹。非阻塞，内部自己把住 LINE_CONTROL_PERIOD_MS
+         的控制周期（当前 5ms）。 */
       LineTracker_Step();
       break;
 
