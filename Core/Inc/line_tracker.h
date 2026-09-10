@@ -80,7 +80,7 @@ extern "C" {
    极左/极右图案时启用。速度取值与 car 的滑移补偿无关——这里不按角度停，
    而是边转边看传感器，压回线就退出，所以不需要 CAR_ANGLE_MIN_SPEED 限制。
    ============================================================================ */
-#define LINE_PIVOT_SPEED         75U
+#define LINE_PIVOT_SPEED         80U
 
 /* 原地转的超时保护。转这么久还没压回线就判丢线并制动。
    ⚠️ 计时从**后退结束、真正开始转**的那一刻起算（见下面的后退相位），
@@ -113,7 +113,7 @@ extern "C" {
 #define LINE_BACKUP_DIST_MM      20U
 
 /* 模式 2 用：后退时长。 */
-#define LINE_BACKUP_TIME_MS      200U
+#define LINE_BACKUP_TIME_MS      100U
 
 /* 后退速度。不要用 LINE_PIVOT_SPEED(90) 那么快——只退 20mm，快了全是惯性滑行，
    停不准。也不要低于 60：占空比刚出死区那一段转速对占空比很不线性，会一顿一顿。 */
