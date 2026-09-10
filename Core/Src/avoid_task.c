@@ -29,22 +29,13 @@ static uint8_t  avoid_step;
 /* 绕行镜像方向：+1 = 右绕（序列表原样），-1 = 左绕（每步转角取反）。 */
 static int8_t   avoid_detour_mirror;
 
-/* ---- 摇头搜寻 ---- */
-/* 已摆过几腿。 */
-static uint8_t  avoid_search_leg;
-/* 当前车头朝向，相对搜寻开始时刻，单位 0.1°（正=左）。存位置而不是增量，
-   每腿的指令角度现算 target - cur，见 .h 里"位置，不是增量"那段。 */
-static int32_t  avoid_search_cur_deg10;
-/* 当前半幅，随腿数递增。 */
-static int32_t  avoid_search_half_deg10;
-/* 搜寻自己的超时起点，与 avoid_start_tick 分开：绕行耗时不占搜寻的额度。 */
-static uint32_t avoid_search_tick;
+/* ---- 末段巡航 ---- */
+/* 巡航自己的超时起点，与 avoid_start_tick 分开：开环五步的耗时不占巡航的额度。 */
+static uint32_t avoid_cruise_tick;
 /* 见线防抖：采样时刻与连续命中次数。 */
-static uint32_t avoid_search_sample_tick;
-static uint8_t  avoid_search_hits;
+static uint32_t avoid_cruise_sample_tick;
+static uint8_t  avoid_cruise_hits;
 
-/* 摇头搜寻的函数放在绕行序列旁边（两者同属固定动作编排，挨着读更顺），
-   但要用到下面才定义的 EnterPhase，所以先声明。 */
 static void AvoidTask_EnterPhase(AvoidTask_State state);
 
 const char *AvoidTask_StateName(AvoidTask_State state)
@@ -55,7 +46,7 @@ const char *AvoidTask_StateName(AvoidTask_State state)
     case AVOID_TURNING: return "TURNING";
     case AVOID_VERIFY:  return "VERIFY";
     case AVOID_DETOUR:  return "DETOUR";
-    case AVOID_SEARCH:  return "SEARCH";
+    case AVOID_CRUISE:  return "CRUISE";
     case AVOID_DONE:    return "DONE";
     case AVOID_FAILED:  return "FAILED";
     default:            return "IDLE";
@@ -64,7 +55,6 @@ const char *AvoidTask_StateName(AvoidTask_State state)
 
 AvoidTask_State AvoidTask_GetState(void) { return avoid_state; }
 uint8_t AvoidTask_GetStep(void) { return avoid_step; }
-uint8_t AvoidTask_GetSearchLeg(void) { return avoid_search_leg; }
 
 void AvoidTask_Init(void)
 {
@@ -74,7 +64,6 @@ void AvoidTask_Init(void)
   avoid_turn_dir = 1;
   avoid_step     = 0U;
   avoid_detour_mirror = 1;
-  avoid_search_leg    = 0U;
 }
 
 /* ==== 固定绕行序列 ==========================================================
@@ -94,20 +83,17 @@ typedef struct
 
 static const AvoidTask_DetourStep avoid_detour[] =
 {
-  { -(int32_t)AVOID_DETOUR_TURN_DEG10, 0U,                    NULL          },
+  { -(int32_t)AVOID_DETOUR_TURN_DEG10 + 100, 0U,                    NULL          },
   { 0,                                 AVOID_DETOUR_LONG_MM,  "forward 300" },
   {  (int32_t)AVOID_DETOUR_TURN_DEG10 - 100, 0U,                    NULL          },
   { 0,                                 AVOID_DETOUR_CROSS_MM, "forward 500" },
   {  (int32_t)AVOID_DETOUR_TURN_DEG10 - 100, 0U,                    NULL          },
-  { 0,                                 AVOID_DETOUR_LONG_MM,  "forward 300" },
-  { -(int32_t)AVOID_DETOUR_TURN_DEG10, 0U,                    NULL          },
+  /* 末段不在表里：最后一次左转之后转入 AVOID_CRUISE，持续前进到见线。 */
 };
 
 #define AVOID_DETOUR_STEPS  (sizeof(avoid_detour) / sizeof(avoid_detour[0]))
 
-/* 序列必须回到原朝向、原横向位置，否则绕完接不回原来那条线。
-   两次右转 + 两次左转，代数和为 0；两段 400mm 长度相同，横向偏出恰好抵消。 */
-_Static_assert(AVOID_DETOUR_STEPS == 7U, "detour sequence must have 7 steps");
+_Static_assert(AVOID_DETOUR_STEPS == 5U, "detour open-loop part must have 5 steps");
 
 /**
   * @brief  发起绕行序列的第 step 步
@@ -143,125 +129,82 @@ static uint8_t AvoidTask_StartDetourStep(uint8_t step)
     return 0U;
   }
 
-  /* 表里的 name 写的是右绕，左绕时左右要反过来报，否则日志会骗人。 */
-  printf("[AVOID] detour step %u/%u: %s\r\n",
-         (unsigned)(step + 1U), (unsigned)AVOID_DETOUR_STEPS,
-         (turn != 0)
-           ? ((turn > 0) ? "turn left 60" : "turn right 60")
-           : s->name);
+  if (turn != 0)
+  {
+    /* 角度按镜像后的实际值报，写死"60"会在改表或左绕时骗人。 */
+    printf("[AVOID] detour step %u/%u: turn %s %ld.%u\r\n",
+           (unsigned)(step + 1U), (unsigned)AVOID_DETOUR_STEPS,
+           (turn > 0) ? "left" : "right",
+           (long)(((turn < 0) ? -turn : turn) / 10),
+           (unsigned)(((turn < 0) ? -turn : turn) % 10));
+  }
+  else
+  {
+    printf("[AVOID] detour step %u/%u: %s\r\n",
+           (unsigned)(step + 1U), (unsigned)AVOID_DETOUR_STEPS, s->name);
+  }
   return 1U;
 }
 
-#if AVOID_SEARCH_ENABLE
+#if AVOID_CRUISE_ENABLE
 
 /**
-  * @brief  摇头搜寻期间轮询循迹传感器，判断是否已经见到线
-  * @retval 1 = 连续 AVOID_SEARCH_CONFIRM 次读到非全白，认定见线
-  *
-  * @note   全白(0x0F)之外的任何图案都算见线，**全黑(0x00)也算**：它出现在路口
-  *         和黑区，同样是可跟的东西，没理由继续摆着找。
+  * @brief  巡航期间轮询循迹传感器，判断是否已经见到线
+  * @retval 1 = 连续 AVOID_CRUISE_CONFIRM 次读到非全白，认定见线
   *
   * @note   按固定间隔采样而不是每轮都读。主循环一轮只几十微秒，不限速地读
   *         GPIO 只是把同一个瞬间读上几百遍，防抖等于没做。
   */
-static uint8_t AvoidTask_SearchSeesLine(uint32_t now)
+static uint8_t AvoidTask_CruiseSeesLine(uint32_t now)
 {
-  if ((uint32_t)(now - avoid_search_sample_tick) < AVOID_SEARCH_SAMPLE_MS)
+  if ((uint32_t)(now - avoid_cruise_sample_tick) < AVOID_CRUISE_SAMPLE_MS)
   {
     return 0U;
   }
-  avoid_search_sample_tick = now;
+  avoid_cruise_sample_tick = now;
 
   if (LineTracker_ReadPattern() != LINE_PATTERN_ALL_WHITE)
   {
-    avoid_search_hits++;
-    return (uint8_t)(avoid_search_hits >= AVOID_SEARCH_CONFIRM);
+    avoid_cruise_hits++;
+    return (uint8_t)(avoid_cruise_hits >= AVOID_CRUISE_CONFIRM);
   }
 
-  /* 中间断了就重新数：要的是**连续**命中，累计命中防不住周期性毛刺。 */
-  avoid_search_hits = 0U;
+  /* 中间断了就重新数：要的是**连续**命中。 */
+  avoid_cruise_hits = 0U;
   return 0U;
 }
 
 /**
-  * @brief  发起摇头搜寻的下一腿
-  * @retval 1=已发起，0=发起失败（car 拒绝）
-  *
-  * @note   偶数腿去 +half（左），奇数腿去 -half（右）——先左后右。
-  *         指令角度是 target - cur，所以第一腿转 30°，之后每腿都要跨过中线，
-  *         转的是两倍振幅。
-  */
-static uint8_t AvoidTask_StartSearchLeg(void)
-{
-  int32_t target;
-  int32_t delta;
-
-  target = ((avoid_search_leg & 1U) == 0U) ?  avoid_search_half_deg10
-                                           : -avoid_search_half_deg10;
-  delta  = target - avoid_search_cur_deg10;
-
-  if (delta == 0)
-  {
-    /* 振幅为 0 才可能走到这里（AVOID_SEARCH_HALF_DEG10 配成 0）。
-       car 会拒绝 0 角度，直接当搜寻结束，别在这空转。 */
-    return 0U;
-  }
-
-  if (Car_StartRotateAngle(AVOID_SEARCH_ROTATE_SPEED, delta) != CAR_ACTION_BUSY)
-  {
-    printf("[AVOID] search leg %u rejected (%ld)\r\n",
-           (unsigned)avoid_search_leg, (long)delta);
-    return 0U;
-  }
-
-  printf("[AVOID] search leg %u: %s %ld.%u (half %ld.%u)\r\n",
-         (unsigned)avoid_search_leg,
-         (delta > 0) ? "left" : "right",
-         (long)(((delta < 0) ? -delta : delta) / 10),
-         (unsigned)(((delta < 0) ? -delta : delta) % 10),
-         (long)(avoid_search_half_deg10 / 10),
-         (unsigned)(avoid_search_half_deg10 % 10));
-
-  /* 目标即将达成（除非中途被见线打断，那时 cur 不再准确——但那种情况下搜寻
-     已经结束，cur 不会再被用到）。 */
-  avoid_search_cur_deg10 = target;
-  return 1U;
-}
-
-/**
-  * @brief  绕行走完，进入摇头搜寻
+  * @brief  开环五步走完，进入末段巡航
   * @retval 1=已进入，0=进不去（应直接结束本轮避障）
   */
-static uint8_t AvoidTask_EnterSearch(uint32_t now)
+static uint8_t AvoidTask_EnterCruise(uint32_t now)
 {
-  avoid_search_leg         = 0U;
-  avoid_search_cur_deg10   = 0;
-  avoid_search_half_deg10  = (int32_t)AVOID_SEARCH_HALF_DEG10;
-  avoid_search_tick        = now;
-  avoid_search_sample_tick = now;
-  avoid_search_hits        = 0U;
+  avoid_cruise_tick        = now;
+  avoid_cruise_sample_tick = now;
+  avoid_cruise_hits        = 0U;
 
-  /* 绕行第七步刚结束时 car 已制动并转 IDLE，这里不必 Abort。 */
-
-  /* 先看一眼：绕行结束时可能本来就压在线上，那就不用摆了。
-     这一眼不走防抖——它不是"转动中的瞬时读数"，车此刻是停着的，
-     没有扫过线的时序问题。 */
+  /* 已经压在线上就不用再往前走了。车此刻是停着的，这一眼不必防抖。 */
   if (LineTracker_ReadPattern() != LINE_PATTERN_ALL_WHITE)
   {
-    printf("[AVOID] on line at detour end, no search\r\n");
+    printf("[AVOID] on line at detour end, no cruise\r\n");
     return 0U;
   }
 
-  if (AvoidTask_StartSearchLeg() == 0U)
+  if (Car_StartForwardDistance(AVOID_CRUISE_SPEED,
+                               AVOID_CRUISE_MAX_MM) != CAR_ACTION_BUSY)
   {
+    printf("[AVOID] cruise rejected\r\n");
     return 0U;
   }
 
-  AvoidTask_EnterPhase(AVOID_SEARCH);
+  printf("[AVOID] cruise until line (max %umm)\r\n",
+         (unsigned)AVOID_CRUISE_MAX_MM);
+  AvoidTask_EnterPhase(AVOID_CRUISE);
   return 1U;
 }
 
-#endif /* AVOID_SEARCH_ENABLE */
+#endif /* AVOID_CRUISE_ENABLE */
 
 /**
   * @brief  按两侧红外原始值选一个更空旷的方向
@@ -426,7 +369,6 @@ void AvoidTask_Begin(void)
          (unsigned)UltrasonicSense_IsBlocked());
 
   avoid_step = 0U;
-  avoid_search_leg = 0U;
 
 #if AVOID_STRATEGY_DETOUR
   {
@@ -467,7 +409,6 @@ void AvoidTask_Cancel(void)
   Indicator_Release(INDICATOR_PRIO_AVOID);
   avoid_state = AVOID_IDLE;
   avoid_step  = 0U;
-  avoid_search_leg = 0U;
 }
 
 /**
@@ -479,7 +420,6 @@ static uint8_t AvoidTask_Finish(uint8_t success)
   Indicator_Release(INDICATOR_PRIO_AVOID);
   avoid_state = AVOID_IDLE;
   avoid_step  = 0U;
-  avoid_search_leg = 0U;
 
   /* 让传感器丢掉动作前的残留判定，下一轮重新采。 */
   IrAvoid_Restart();
@@ -507,13 +447,13 @@ uint8_t AvoidTask_Step(void)
     uint32_t limit;
     uint32_t base;
 
-#if AVOID_SEARCH_ENABLE
-    if (avoid_state == AVOID_SEARCH)
+#if AVOID_CRUISE_ENABLE
+    if (avoid_state == AVOID_CRUISE)
     {
-      /* ⚠️ 搜寻的额度**单独起算**。若沿用 avoid_start_tick，绕行七步的 6~8s
-         已经计入，搜寻还没摆两腿就会被判超时——摇头等于没加。 */
-      limit = AVOID_SEARCH_TIMEOUT_MS;
-      base  = avoid_search_tick;
+      /* ⚠️ 巡航的额度**单独起算**。若沿用 avoid_start_tick，开环五步的 6~8s
+         已经计入，巡航还没走几厘米就会被判超时。 */
+      limit = AVOID_CRUISE_TIMEOUT_MS;
+      base  = avoid_cruise_tick;
     }
     else
 #endif
@@ -548,17 +488,15 @@ uint8_t AvoidTask_Step(void)
           avoid_step++;
           if (avoid_step >= AVOID_DETOUR_STEPS)
           {
-            /* 七步走完。不判断障碍是否还在——固定序列的定义就是走完这条路径；
-               障碍若还挡着，传感器下一轮会重新触发。 */
-            printf("[AVOID] detour complete\r\n");
-#if AVOID_SEARCH_ENABLE
-            /* 理论上朝向与横向都回到了原样，但七步是开环的，误差一路累加，
-               实际常常偏出线外。先摇头找线，找到再交还控制权。 */
-            if (AvoidTask_EnterSearch(now) != 0U)
+            /* 开环五步走完。不判断障碍是否还在——障碍若还挡着，传感器下一轮
+               会重新触发。 */
+            printf("[AVOID] detour open-loop done\r\n");
+#if AVOID_CRUISE_ENABLE
+            if (AvoidTask_EnterCruise(now) != 0U)
             {
               break;
             }
-            /* 进不去搜寻（已经压在线上，或 car 拒绝旋转）：按原样直接交还。 */
+            /* 进不去巡航（已经压在线上，或 car 拒绝动作）：直接交还。 */
 #endif
             return AvoidTask_Finish(1U);
           }
@@ -577,16 +515,13 @@ uint8_t AvoidTask_Step(void)
       }
       break;
 
-#if AVOID_SEARCH_ENABLE
-    case AVOID_SEARCH:
-      /* 见线判定放在 Car_ActionStep 之前：这一腿可能刚好在本轮转完，先判定
-         就能在"转完"和"见线"同时成立时优先认见线，少摆一腿。 */
-      if (AvoidTask_SearchSeesLine(now) != 0U)
+#if AVOID_CRUISE_ENABLE
+    case AVOID_CRUISE:
+      /* 见线判定放在 Car_ActionStep 之前：见线立刻停手，不等距离走完。 */
+      if (AvoidTask_CruiseSeesLine(now) != 0U)
       {
-        printf("[AVOID] search hit line at leg %u, pattern=0x%02X\r\n",
-               (unsigned)avoid_search_leg, (unsigned)LineTracker_ReadPattern());
-        /* 打断旋转。这是本状态存在的意义——不转完再看，见线立刻停手，
-           姿态停在压着线的那一刻，循迹接上时偏差最小。 */
+        printf("[AVOID] cruise hit line, pattern=0x%02X\r\n",
+               (unsigned)LineTracker_ReadPattern());
         Car_ActionAbort();
         return AvoidTask_Finish(1U);
       }
@@ -597,28 +532,17 @@ uint8_t AvoidTask_Step(void)
           break;
 
         case CAR_ACTION_DONE:
-          /* 这一腿摆完还没见线，换方向摆下一腿，并把振幅张开一点。 */
-          avoid_search_leg++;
-          avoid_search_half_deg10 += (int32_t)AVOID_SEARCH_GROW_DEG10;
-          if (avoid_search_half_deg10 > (int32_t)AVOID_SEARCH_MAX_HALF_DEG10)
-          {
-            avoid_search_half_deg10 = (int32_t)AVOID_SEARCH_MAX_HALF_DEG10;
-          }
-          if (AvoidTask_StartSearchLeg() == 0U)
-          {
-            printf("[AVOID] search cannot continue, hand back\r\n");
-            return AvoidTask_Finish(0U);
-          }
-          avoid_phase_tick = now;
-          break;
+          /* 走满上限仍没见线：交还控制权，由循迹自己走丢线逻辑。 */
+          printf("[AVOID] cruise reached %umm, no line\r\n",
+                 (unsigned)AVOID_CRUISE_MAX_MM);
+          return AvoidTask_Finish(0U);
 
         default:
-          /* 某一腿超时或失败：car 已制动。交还控制权，让循迹走自己的丢线逻辑。 */
-          printf("[AVOID] search leg %u failed\r\n", (unsigned)avoid_search_leg);
+          printf("[AVOID] cruise failed\r\n");
           return AvoidTask_Finish(0U);
       }
       break;
-#endif /* AVOID_SEARCH_ENABLE */
+#endif /* AVOID_CRUISE_ENABLE */
 
     case AVOID_BACKING:
       switch (Car_ActionStep())
