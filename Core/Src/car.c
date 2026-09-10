@@ -12,16 +12,16 @@
 #include <stdio.h>
 
 /* Private define ------------------------------------------------------------*/
-/* 左右两侧电机镜像安装，因此两侧底层极性相反。 */
+/* 左右电机镜像安装，两侧底层极性相反。 */
 #define CAR_LEFT_POLARITY          (1)
 #define CAR_RIGHT_POLARITY         (-1)
 
-/* 整车前进方向补偿。根据最新实车测试，Car_Drive() 的正输入需要整体取反
-   才对应物理车头方向。以后只调整这一项，不再同时改多个方向参数。 */
+/* 整车方向补偿：实测 Car_Drive() 的正输入要整体取反才对应物理车头方向。
+   车头方向不对**只调这一项**，不要再去改上面两个极性。 */
 #define CAR_FORWARD_POLARITY       (-1)
 
 /* Private types -------------------------------------------------------------*/
-/* 动作种类。IDLE 之外每一种对应 Car_ActionStep() 里的一个推进分支。 */
+/* 动作种类，每一种对应 Car_ActionStep() 里的一个推进分支。 */
 typedef enum
 {
   CAR_ACT_NONE = 0,
@@ -39,7 +39,7 @@ typedef struct
   uint32_t last_report_tick;
   uint32_t timeout_ms;
 
-  /* 编码器起始快照。不清零全局计数，用增量判断动作是否达标。 */
+  /* 编码器起始快照：不清零全局计数，用增量判断是否达标。 */
   int32_t  start_distance_mm;
   int32_t  start_angle_deg10;
 
@@ -83,9 +83,9 @@ static Car_ActionStatus Car_StepRamp(uint32_t elapsed);
   * @brief  按车体方向驱动左右两侧车轮
   * @param  left:  左侧有效速度，-CAR_SPEED_SPAN~CAR_SPEED_SPAN，正数向前
   * @param  right: 右侧有效速度，同上
-  * @note   入参是**有效速度**（已减掉死区），这里负责加回 CAR_SPEED_BASE
-  *         再下发，并通过极性宏把"车体方向"换算成各电机的实际转向。
-  *         上层函数只在有效速度刻度上做比例运算，不必关心死区和接线。
+  * @note   入参是**有效速度**（已减掉死区）。这里加回 CAR_SPEED_BASE 再下发，
+  *         并用极性宏把"车体方向"换算成各电机的实际转向，上层因此只需在有效
+  *         速度刻度上做比例运算，不必关心死区和接线。
   */
 static void Car_Drive(int16_t left, int16_t right)
 {
@@ -107,8 +107,8 @@ static void Car_Drive(int16_t left, int16_t right)
   * @param  speed: 占空比刻度 0~100
   * @retval 有效速度 0~CAR_SPEED_SPAN
   *
-  * @note   减去死区。不超过 CAR_SPEED_BASE 的输入一律返回 0，因为那一段
-  *         占空比电机根本不转，抬到 BASE+1 反而变成"用户要停我却在动"。
+  * @note   ≤ CAR_SPEED_BASE 的输入一律返回 0：那段占空比电机根本不转，抬到
+  *         BASE+1 反而变成"用户要停我却在动"。
   */
 static uint8_t Car_ToEff(uint8_t speed)
 {
@@ -128,8 +128,8 @@ static uint8_t Car_ToEff(uint8_t speed)
   * @param  eff: 有效速度，-CAR_SPEED_SPAN~CAR_SPEED_SPAN，正数向前
   * @retval 占空比刻度，符号保留
   *
-  * @note   加回死区。有效速度 0 输出 0 而不是 BASE：输出 BASE 电机
-  *         照样不转，却白白通电发热，还让被拖动的轮子多了阻力。
+  * @note   有效速度 0 输出 0 而非 BASE：输出 BASE 电机照样不转，却白白通电
+  *         发热，还给被拖动的轮子添阻力。
   */
 static int16_t Car_EffToDuty(int16_t eff)
 {
@@ -195,14 +195,12 @@ static uint16_t Car_AngleCompX1000(uint8_t speed, uint16_t radius_mm,
   * @param  radius_mm: 转弯半径（车体中心线到圆心），单位 mm
   * @retval 内侧轮有效速度 0~CAR_SPEED_SPAN
   *
-  * @note   差速运动学：两轮走同心圆、角速度相同，故
-  *             v₂ / (R + D/2) = v₁ / (R - D/2)
-  *         整理即 2R(v₂ - v₁) = D(v₁ + v₂)，解出内轮速
-  *             v₁ = v₂ · (2R - D) / (2R + D)
-  *         R = D/2 时 v₁ = 0（绕内侧轮打转），R → ∞ 时 v₁ → v₂（直线）。
+  * @note   差速运动学：两轮同心圆、角速度相同，v₂/(R + D/2) = v₁/(R - D/2)，
+  *         解出内轮速 v₁ = v₂ · (2R - D)/(2R + D)。R = D/2 时 v₁ = 0（绕内侧轮
+  *         打转），R → ∞ 时 v₁ → v₂（直线）。
   *
-  * @note   v 必须是**有效速度**而不是占空比。占空比含 50% 的死区偏置，
-  *         按占空比取比例会把偏置也按比例缩放，速比失真、半径偏大。
+  * @note   v 必须是**有效速度**：占空比含 50% 死区偏置，按占空比取比例会把偏置
+  *         也缩放掉，速比失真、半径偏大。
   */
 static int16_t Car_InnerSpeed(uint8_t outer, uint16_t radius_mm)
 {
@@ -216,21 +214,14 @@ static int16_t Car_InnerSpeed(uint8_t outer, uint16_t radius_mm)
   return (int16_t)((int32_t)outer * (r2 - d) / (r2 + d));
 }
 
-/**
-  * @brief  保持当前动作一段时间后制动
-  * @param  time: 毫秒
-  * @note   阻塞式，仅供保留的调试接口使用。
-  */
+/** @brief 保持当前动作 time 毫秒后制动。阻塞式，仅供保留的调试接口使用。 */
 static void Car_RunFor(uint16_t time)
 {
   HAL_Delay(time);
   Motor_BrakeAll();
 }
 
-/**
-  * @brief  int32 取绝对值
-  * @note   用 int64 中转，避免 INT32_MIN 取反溢出。
-  */
+/** @brief int32 取绝对值。用 int64 中转，避免 INT32_MIN 取反溢出。 */
 static int32_t Car_Abs32(int32_t v)
 {
   return (v >= 0) ? v : (int32_t)(-(int64_t)v);
@@ -245,8 +236,7 @@ static int32_t Car_Abs32(int32_t v)
   * @param  right:     输出右侧有效速度
   * @retval 1=参数可用，0=速度落在死区内，调用方应制动并放弃动作
   *
-  * @note   从原 Car_RunAngle 抽出，阻塞与非阻塞两条路径共用，避免运动学
-  *         算式出现两份实现。
+  * @note   阻塞与非阻塞两条路径共用，避免运动学算式出现两份实现。
   */
 static uint8_t Car_AngleWheelSpeeds(uint8_t speed, uint16_t radius_mm,
                                     int8_t direction,
@@ -262,13 +252,11 @@ static uint8_t Car_AngleWheelSpeeds(uint8_t speed, uint16_t radius_mm,
 
   if (radius_mm == 0U)
   {
-    /* 原地旋转：左右轮等速反向。 */
-    inner = (int16_t)(-outer);
+    inner = (int16_t)(-outer);   /* 原地旋转：左右轮等速反向 */
   }
   else if (radius_mm <= CAR_RADIUS_MIN_MM)
   {
-    /* 绕内侧轮旋转，内侧轮停止。 */
-    inner = 0;
+    inner = 0;                   /* 绕内侧轮打转，内侧轮停 */
   }
   else
   {
@@ -288,9 +276,7 @@ static uint8_t Car_AngleWheelSpeeds(uint8_t speed, uint16_t radius_mm,
   return 1U;
 }
 
-/**
-  * @brief  结束当前动作：制动、清状态、返回终态
-  */
+/** @brief 结束当前动作：制动、清状态、返回终态 */
 static Car_ActionStatus Car_ActionFinish(Car_ActionStatus status)
 {
   Motor_BrakeAll();
@@ -300,15 +286,14 @@ static Car_ActionStatus Car_ActionFinish(Car_ActionStatus status)
 
 /**
   * @brief  循环推进当前动作直到终态
-  * @note   阻塞式，仅供保留的标定接口使用。正式主循环应自己调 Car_ActionStep()。
-  *         这里保留 1ms 让步，与原实现的节奏一致。
+  * @note   阻塞式，仅供保留的标定接口使用；正式主循环自己调 Car_ActionStep()。
   */
 static Car_ActionStatus Car_RunToCompletion(Car_ActionStatus start_status)
 {
   Car_ActionStatus status = start_status;
 
-  /* 发起失败时直接返回。不能盲目 Step —— 若失败原因是"已有动作在跑"，
-     继续 Step 会把别人的动作推到完成。 */
+  /* 只在 BUSY 时推进：发起失败若是因为"已有动作在跑"，盲目 Step 会把别人的
+     动作推到完成。 */
   while (status == CAR_ACTION_BUSY)
   {
     HAL_Delay(1U);
@@ -322,8 +307,7 @@ static Car_ActionStatus Car_RunToCompletion(Car_ActionStatus start_status)
   * @param  speed:       占空比刻度 0~100
   * @param  distance_mm: 目标距离 mm
   * @param  direction:   1=前进，-1=后退
-  * @note   此函数为阻塞式；Encoder_Update() 由 SysTick 持续执行，所以等待
-  *         期间编码器仍会正常累计。到达目标或超时后使用能耗制动停车。
+  * @note   阻塞式。Encoder_Update() 由 SysTick 驱动，等待期间编码器仍正常累计。
   */
 static void Car_RunDistance(uint8_t speed, uint32_t distance_mm, int8_t direction)
 {
@@ -351,7 +335,7 @@ static void Car_RunAngle(uint8_t speed, uint16_t radius_mm,
 /* ==== 非阻塞动作状态机 =====================================================*/
 
 /**
-  * @brief  登记一个新动作的公共字段
+  * @brief  登记新动作的公共字段
   * @retval 1=可以继续，0=已有动作在跑
   */
 static uint8_t Car_ActionBegin(Car_ActionKind kind, int8_t direction)
@@ -369,7 +353,6 @@ static uint8_t Car_ActionBegin(Car_ActionKind kind, int8_t direction)
   car_action.start_tick        = now;
   car_action.last_report_tick  = now;
   car_action.timeout_ms        = CAR_DISTANCE_TIMEOUT_MS;
-  /* 起始快照：不清零全局计数，用增量判断达标。 */
   car_action.start_distance_mm = Encoder_GetDistanceAvg();
   car_action.start_angle_deg10 = Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM);
   return 1U;
@@ -434,7 +417,7 @@ Car_ActionStatus Car_StartTurnAngle(uint8_t speed, uint16_t radius_mm,
   }
 
 #if CAR_ANGLE_COMP_ENABLE
-  /* 滑移补偿表只在 CAR_ANGLE_MIN_SPEED 以上标定过，低速原地旋转不接受。 */
+  /* 补偿表只在 CAR_ANGLE_MIN_SPEED 以上标定过，低速原地旋转一律拒绝。 */
   if ((radius_mm == 0U) && (speed < CAR_ANGLE_MIN_SPEED))
   {
     printf("[ANGLE] rejected: speed %u < calibrated minimum %u\r\n",
@@ -480,7 +463,6 @@ Car_ActionStatus Car_StartTimed(int16_t left, int16_t right, uint16_t time)
   }
 
   car_action.duration_ms = time;
-  /* 纯计时动作不依赖编码器，duration 到点必然完成，超时上限留一点余量即可。 */
   car_action.timeout_ms  = (uint32_t)time + CAR_ACTION_TIMEOUT_MARGIN_MS;
 
   if (time == 0U)
@@ -532,9 +514,7 @@ Car_ActionStatus Car_StartBrake(uint16_t time)
   return CAR_ACTION_BUSY;
 }
 
-/**
-  * @brief  推进 DISTANCE 动作一步
-  */
+/** @brief 推进 DISTANCE 动作一步 */
 static Car_ActionStatus Car_StepDistance(uint32_t now)
 {
   int32_t  distance  = Encoder_GetDistanceAvg() - car_action.start_distance_mm;
@@ -564,9 +544,7 @@ static Car_ActionStatus Car_StepDistance(uint32_t now)
   return CAR_ACTION_BUSY;
 }
 
-/**
-  * @brief  推进 ANGLE 动作一步
-  */
+/** @brief 推进 ANGLE 动作一步 */
 static Car_ActionStatus Car_StepAngle(uint32_t now)
 {
   int32_t  angle  = Encoder_GetRotationDeg10(CAR_WHEEL_TRACK_MM)
@@ -595,8 +573,7 @@ static Car_ActionStatus Car_StepAngle(uint32_t now)
 
 /**
   * @brief  推进 RAMP 动作一步
-  * @note   按已用时间比例插值，取代原先每 CAR_RAMP_STEP_MS 一次 HAL_Delay
-  *         的写法。插值仍在有效速度刻度上做，加速度保持恒定。
+  * @note   按已用时间比例插值。插值在有效速度刻度上做，加速度才恒定。
   */
 static Car_ActionStatus Car_StepRamp(uint32_t elapsed)
 {
@@ -628,7 +605,7 @@ Car_ActionStatus Car_ActionStep(void)
   now     = HAL_GetTick();
   elapsed = (uint32_t)(now - car_action.start_tick);
 
-  /* 超时保护先判：编码器没有脉冲时到期制动，防止一直运行。 */
+  /* 超时先判：编码器没有脉冲时到期制动，防止一直运行。 */
   if (elapsed >= car_action.timeout_ms)
   {
     printf("[CAR] action %u timeout after %lums\r\n",
@@ -683,12 +660,11 @@ uint8_t Car_IsActionBusy(void)
   * @brief  直接指定左右两侧速度
   * @param  left/right: 占空比刻度 -100~100，正数向前
   * @note   供循迹差速修正和遥控手动转向使用。入参是占空比刻度而非有效速度，
-  *         内部负责死区换算，调用方不必了解 CAR_SPEED_BASE。
+  *         死区换算在内部做，调用方不必了解 CAR_SPEED_BASE。
   */
 void Car_DriveSpeed(int16_t left, int16_t right)
 {
-  /* 先夹到 ±MOTOR_SPEED_MAX，再交给 Car_ToEff 做死区换算。不夹的话
-     超范围的入参转 uint8_t 会截断，符号还在、数值却绕回去。 */
+  /* 必须先夹再换算：超范围的入参转 uint8_t 会截断，符号还在、数值却绕回去。 */
   int16_t lc = (left  >  (int16_t)MOTOR_SPEED_MAX) ?  (int16_t)MOTOR_SPEED_MAX
              : (left  < -(int16_t)MOTOR_SPEED_MAX) ? -(int16_t)MOTOR_SPEED_MAX
                                                    : left;
@@ -706,8 +682,8 @@ void Car_DriveSpeed(int16_t left, int16_t right)
 
 /**
   * @brief  小车运动控制初始化
-  * @note   内部调用 Motor_Init() 启动 8 路 PWM，调用前需先完成
-  *         MX_TIM1_Init() 与 MX_TIM8_Init()。
+  * @note   内部 Motor_Init() 启动 8 路 PWM，调用前必须先完成 MX_TIM1_Init()
+  *         与 MX_TIM8_Init()。
   */
 void Car_Init(void)
 {
@@ -715,11 +691,10 @@ void Car_Init(void)
   car_action.kind = CAR_ACT_NONE;
 }
 
-/**
-  * @brief  前进
-  * @param  speed: 速度百分比 0~100
-  * @param  time:  持续时间（毫秒），结束后自动制动
-  */
+/* 以下为阻塞式接口，speed 为占空比刻度 0~100，time 为毫秒且到点自动制动。
+   详见 car.h 末尾的说明：仅作标定入口，正式主循环用 Car_Start* 系列。 */
+
+/** @brief 前进 */
 void Car_Forward(uint8_t speed, uint16_t time)
 {
   int16_t v = (int16_t)Car_ToEff(speed);
@@ -727,11 +702,7 @@ void Car_Forward(uint8_t speed, uint16_t time)
   Car_RunFor(time);
 }
 
-/**
-  * @brief  后退
-  * @param  speed: 速度百分比 0~100
-  * @param  time:  持续时间（毫秒），结束后自动制动
-  */
+/** @brief 后退 */
 void Car_Backward(uint8_t speed, uint16_t time)
 {
   int16_t v = (int16_t)Car_ToEff(speed);
@@ -739,54 +710,35 @@ void Car_Backward(uint8_t speed, uint16_t time)
   Car_RunFor(time);
 }
 
-/**
-  * @brief  非阻塞式前进，供循迹等周期控制使用
-  */
+/** @brief 非阻塞式前进，供循迹等周期控制使用 */
 void Car_ForwardRun(uint8_t speed)
 {
   int16_t v = (int16_t)Car_ToEff(speed);
   Car_Drive(v, v);
 }
 
-/**
-  * @brief  立即制动
-  */
+/** @brief 立即制动 */
 void Car_Stop(void)
 {
   Motor_BrakeAll();
 }
 
-/**
-  * @brief  前进指定距离后制动
-  * @param  speed:       速度百分比 0~100，必须大于 CAR_SPEED_BASE
-  * @param  distance_mm: 目标距离 mm
-  */
+/** @brief 前进 distance_mm 后制动。speed 必须大于 CAR_SPEED_BASE。 */
 void Car_ForwardDistance(uint8_t speed, uint32_t distance_mm)
 {
   Car_RunDistance(speed, distance_mm, 1);
 }
 
-/**
-  * @brief  后退指定距离后制动
-  * @param  speed:       速度百分比 0~100，必须大于 CAR_SPEED_BASE
-  * @param  distance_mm: 目标距离 mm
-  */
+/** @brief 后退 distance_mm 后制动 */
 void Car_BackwardDistance(uint8_t speed, uint32_t distance_mm)
 {
   Car_RunDistance(speed, distance_mm, -1);
 }
 
 /**
-  * @brief  变速直线：速度在 time 内从 speed_from 线性变到 speed_to
-  * @param  speed_from: 起始速度百分比 0~100
-  * @param  speed_to:   结束速度百分比 0~100，比起始小就是减速
-  * @param  time:       全程时间（毫秒），结束后自动制动
-  *
-  * @note   插值在**有效速度**刻度上做。若按占空比插值，50% 的死区偏置也
-  *         被算进插值区间，速度-时间曲线在低速段会被压扁，加速度不恒定。
-  *
-  * @note   每 CAR_RAMP_STEP_MS 更新一次占空比。time 不是步长整数倍时，
-  *         余下的零头并在最后一步，保证总时间准确、末速正好是 speed_to。
+  * @brief  变速直线：速度在 time 内从 speed_from 线性变到 speed_to（小则为减速）
+  * @note   插值在**有效速度**刻度上做。按占空比插值会把 50% 死区偏置也算进
+  *         插值区间，速度-时间曲线在低速段被压扁，加速度不恒定。
   */
 void Car_ForwardVary(uint8_t speed_from, uint8_t speed_to, uint16_t time)
 {
@@ -795,10 +747,9 @@ void Car_ForwardVary(uint8_t speed_from, uint8_t speed_to, uint16_t time)
 
 /**
   * @brief  左转，转弯半径可调
-  * @param  speed:     外侧（右侧）车轮速度百分比 0~100
-  * @param  radius_mm: 转弯半径（车体中心线到圆心），单位 mm
-  *                    ≤ D/2 时内侧轮停转，绕内侧轮打转；越大弯道越缓
-  * @param  time:      持续时间（毫秒），结束后自动制动
+  * @param  speed:     外侧（右侧）车轮速度
+  * @param  radius_mm: 车体中心线到圆心，mm。≤ D/2 时内侧轮停转、绕内侧轮打转；
+  *                    越大弯道越缓
   */
 void Car_TurnLeft(uint8_t speed, uint16_t radius_mm, uint16_t time)
 {
@@ -807,13 +758,7 @@ void Car_TurnLeft(uint8_t speed, uint16_t radius_mm, uint16_t time)
   Car_RunFor(time);
 }
 
-/**
-  * @brief  右转，转弯半径可调
-  * @param  speed:     外侧（左侧）车轮速度百分比 0~100
-  * @param  radius_mm: 转弯半径（车体中心线到圆心），单位 mm
-  *                    ≤ D/2 时内侧轮停转，绕内侧轮打转；越大弯道越缓
-  * @param  time:      持续时间（毫秒），结束后自动制动
-  */
+/** @brief 右转，转弯半径可调。speed 为外侧（左侧）轮速，radius_mm 同上。 */
 void Car_TurnRight(uint8_t speed, uint16_t radius_mm, uint16_t time)
 {
   uint8_t outer = Car_ToEff(speed);
@@ -821,11 +766,7 @@ void Car_TurnRight(uint8_t speed, uint16_t radius_mm, uint16_t time)
   Car_RunFor(time);
 }
 
-/**
-  * @brief  左旋转（原地左转，左轮后退右轮前进）
-  * @param  speed: 速度百分比 0~100
-  * @param  time:  持续时间（毫秒），结束后自动制动
-  */
+/** @brief 原地左转（左轮后退、右轮前进） */
 void Car_RotateLeft(uint8_t speed, uint16_t time)
 {
   int16_t v = (int16_t)Car_ToEff(speed);
@@ -833,11 +774,7 @@ void Car_RotateLeft(uint8_t speed, uint16_t time)
   Car_RunFor(time);
 }
 
-/**
-  * @brief  右旋转（原地右转，左轮前进右轮后退）
-  * @param  speed: 速度百分比 0~100
-  * @param  time:  持续时间（毫秒），结束后自动制动
-  */
+/** @brief 原地右转（左轮前进、右轮后退） */
 void Car_RotateRight(uint8_t speed, uint16_t time)
 {
   int16_t v = (int16_t)Car_ToEff(speed);
@@ -845,43 +782,36 @@ void Car_RotateRight(uint8_t speed, uint16_t time)
   Car_RunFor(time);
 }
 
-/**
-  * @brief  按编码器角度原地左转
-  * @param  speed:      速度百分比 0~100
-  * @param  angle_deg10:目标角度，单位 0.1 度，例如 900=90.0 度
-  */
+/* 以下四个按编码器角度运动，angle_deg10 单位 0.1 度（900 = 90.0°）。 */
+
+/** @brief 原地左转指定角度 */
 void Car_RotateLeftAngle(uint8_t speed, uint32_t angle_deg10)
 {
   Car_RunAngle(speed, 0U, angle_deg10, 1);
 }
 
-/**
-  * @brief  按编码器角度原地右转
-  */
+/** @brief 原地右转指定角度 */
 void Car_RotateRightAngle(uint8_t speed, uint32_t angle_deg10)
 {
   Car_RunAngle(speed, 0U, angle_deg10, -1);
 }
 
-/**
-  * @brief  按编码器角度左转指定半径圆弧
-  */
+/** @brief 左转指定半径圆弧 */
 void Car_TurnLeftAngle(uint8_t speed, uint16_t radius_mm, uint32_t angle_deg10)
 {
   Car_RunAngle(speed, radius_mm, angle_deg10, 1);
 }
 
-/**
-  * @brief  按编码器角度右转指定半径圆弧
-  */
+/** @brief 右转指定半径圆弧 */
 void Car_TurnRightAngle(uint8_t speed, uint16_t radius_mm, uint32_t angle_deg10)
 {
   Car_RunAngle(speed, radius_mm, angle_deg10, -1);
 }
 
 /**
-  * @brief  制动
-  * @param  time: 制动状态保持的时间（毫秒），传 0 则立即返回
+  * @brief  制动并保持 time 毫秒，传 0 则立即返回
+  * @note   故意不走状态机：它常被当作"立即停车"的同义词，改状态机会让
+  *         Car_Brake(0) 这类调用多绕一圈。要非阻塞制动用 Car_StartBrake()。
   */
 void Car_Brake(uint16_t time)
 {
@@ -892,19 +822,14 @@ void Car_Brake(uint16_t time)
   }
 }
 
-/* 说明：Car_Brake() 保持原样（直接制动 + 阻塞等待），因为它常被用作"立即停车"
-   的同义词，改成状态机会让 Car_Brake(0) 之类的调用多绕一圈。需要非阻塞制动
-   保持的场合用 Car_StartBrake()。 */
-
 /**
   * @brief  走一个三叶草轨迹
   * @param  speed:     叶片行驶速度 0~100
   * @param  radius_mm: 叶片转弯半径 mm，越小整个图形占地越小
   * @param  leaf_time: 走完一整片叶子（转一整圈）的时间（毫秒）
   *
-  * @note   每片叶子是一整圈 360° 定半径圆弧，走完车回到出发点、朝向复原；
-  *         再原地左旋 120° 换下一片叶子的方向。三片叶子的圆心按 120°
-  *         均匀分布，合起来就是三叶草：
+  * @note   每片叶子是一整圈 360° 定半径圆弧，走完回到出发点、朝向复原，再原地
+  *         左旋 120° 对准下一片。三个圆心按 120° 均匀分布，合起来是三叶草：
   *
   *                    ___
   *                   /   \        ← 叶 1
@@ -912,14 +837,11 @@ void Car_Brake(uint16_t time)
   *             /   \  /|\  /   \
   *             \___/   |   \___/  ← 叶 2、叶 3
   *
-  *         三次旋转累计 360°，一轮结束后车头方向与开始时一致，可无缝重复。
-  *         整个图形的外径约 4R，R = 150mm 时占地约 60cm 见方。
+  *         三次旋转累计 360°，一轮结束后车头朝向与开始一致，可无缝重复。
+  *         外径约 4R，R = 150mm 时占地约 60cm 见方。
   *
-  * @note   目前圆弧和旋转角度靠时间估算，leaf_time 和 CLOVER_TURN_MS
-  *         必须在实际场地上标定：
-  *           1. 先只跑一片叶子，调 leaf_time 到车刚好回到出发点；
-  *           2. 再调 CLOVER_TURN_MS 到原地转过的角度接近 120°。
-  *         电池电压下降会让两个时间都变长。接上编码器后可改成按里程闭环。
+  * @note   开环靠时间估算，leaf_time 与 CLOVER_TURN_MS 的标定方法见 car.h。
+  *         电池电压下降会让两个时间都变长。
   */
 void Car_Clover(uint8_t speed, uint16_t radius_mm, uint16_t leaf_time)
 {

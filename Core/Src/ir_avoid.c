@@ -14,8 +14,7 @@
 
 #include <stdio.h>
 
-/* 采样相位。发射管使能后需要 IR_AVOID_EMITTER_SETTLE_MS 稳定，
-   原来用 HAL_Delay 等，现在拆成相位由主循环推进。 */
+/* 采样相位：发射管使能后要等 IR_AVOID_EMITTER_SETTLE_MS 稳定，拆成相位由主循环推进。 */
 typedef enum
 {
   IR_PHASE_IDLE = 0,      /* 等下一轮采样周期 */
@@ -107,9 +106,7 @@ void IrAvoid_Restart(void)
   ir_has_sample  = 0U;
 }
 
-/**
-  * @brief  两路原始值都拿到后，更新状态并在变化时发事件
-  */
+/** @brief 两路原始值都拿到后，更新状态并在变化时发事件 */
 static void IrAvoid_Commit(uint32_t now)
 {
   IrAvoid_State previous = ir_state;
@@ -161,8 +158,7 @@ void IrAvoid_Sense(void)
         return;
       }
       ir_last_update = now;
-      /* 开左发射管，等稳定。 */
-      IrAvoid_SetEmitter(1U, 0U);
+      IrAvoid_SetEmitter(1U, 0U);   /* 开左发射管，等稳定 */
       ir_phase_tick = now;
       ir_phase      = IR_PHASE_LEFT_SETTLE;
       break;
@@ -173,8 +169,7 @@ void IrAvoid_Sense(void)
         return;
       }
       ir_left_raw = IrAvoid_ReadChannel(IR_AVOID_LEFT_ADC_CHANNEL);
-      /* 关左、开右，等稳定。 */
-      IrAvoid_SetEmitter(0U, 1U);
+      IrAvoid_SetEmitter(0U, 1U);   /* 关左、开右，等稳定 */
       ir_phase_tick = now;
       ir_phase      = IR_PHASE_RIGHT_SETTLE;
       break;
@@ -193,9 +188,7 @@ void IrAvoid_Sense(void)
   }
 }
 
-/**
-  * @brief  阻塞式单次采样，仅供独立标定使用
-  */
+/** @brief 阻塞式单次采样，仅供独立标定使用 */
 void IrAvoid_UpdateBlocking(void)
 {
   uint32_t now;

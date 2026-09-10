@@ -33,16 +33,11 @@ static uint8_t  indicator_blink_on;
 
 /**
   * @brief  按位写一侧 RGB
-  * @note   直接写引脚，不经过 main.c 的 RGB_SetColor()——那个函数的 r/g 参数
-  *         与左右侧是交叉映射的，绕开它可以避免继续传播那个坑。
+  * @note   直接写引脚，不经过 main.c 的 RGB_SetColor()。
   *
   * @note   **已知硬件差异**：左侧 RGB 的 R/G 两个引脚与 main.h 里的命名相反，
   *         所以申请 INDICATOR_RED 时左侧实际亮绿色、右侧正常亮红色。表现就是
   *         避障/急停告警时"左绿右红"。
-  *
-  *         原 RGB_SetColor() 是靠交叉传参掩盖这一点的（左侧 R 引脚喂 g 参数）。
-  *         这里按引脚名直写，所以差异暴露出来了。属于接线问题，不是逻辑错误，
-  *         已经在软件里补偿。
   */
 static void Indicator_WriteLeft(Indicator_Color color)
 {
@@ -98,14 +93,12 @@ void Indicator_RequestTimed(Indicator_Prio prio, uint8_t buzzer,
 
   slot = &indicator_slots[prio];
 
-  /* 参数完全相同就只是"续订"，不重启点鸣计数——否则调用方每轮主循环重复
-     申请时，蜂鸣器会被反复重置成第一声，变成一直响。 */
+  /* 参数完全相同就不重启点鸣计数——否则调用方每轮主循环重复申请时，蜂鸣器会被反复重置成第一声 */
   if ((slot->active   != 0U)      && (slot->buzzer == buzzer) &&
       (slot->left     == left)    && (slot->right  == right)  &&
       (slot->blink_ms == blink_ms))
   {
-    /* 定时申请例外：重复申请当作"续期"，把 hold_ms 从现在重新起算。
-       "每识别到一次就再亮 1s"靠的就是这一条。点鸣计数仍然不动。 */
+    /* 定时申请例外：重复申请当作"续期"，把 hold_ms 从现在重新起算。点鸣计数仍然不动。 */
     if (hold_ms != 0U)
     {
       slot->hold_ms    = hold_ms;
@@ -200,8 +193,7 @@ void Indicator_Step(void)
   uint32_t now = HAL_GetTick();
   uint8_t  show;
 
-  /* 定时申请到期就自动撤销，调用方不必自己记时间。必须在裁决**之前**做，
-     否则本轮还会按已过期的申请点灯。 */
+  /* 定时申请到期就自动撤销，调用方不必自己记时间。必须在裁决**之前**做。 */
   for (uint8_t i = 1U; i < (uint8_t)INDICATOR_PRIO_COUNT; i++)
   {
     Indicator_Slot *s = &indicator_slots[i];

@@ -79,9 +79,7 @@ void VisionUart_RxCpltCallback(UART_HandleTypeDef *huart)
   vision_last_byte = vision_rx_byte;
 
   /* ---- 帧间静默检测：超时就无条件重新对齐 ----
-     一帧的三个字节是连着发的（115200 下字节间隔约 87us）。距上一个字节
-     超过 VISION_FRAME_TIMEOUT_MS 说明上一帧已经结束或残缺，当前字节必须
-     按"新帧的第一个字节"来解释，否则残帧会把后面的帧一路错位下去。 */
+     一帧的三个字节是连着发的（115200 下字节间隔约 87us）。 */
   if (((uint32_t)(now - vision_last_byte_tick) >= VISION_FRAME_TIMEOUT_MS) &&
       (vision_frame_step != 0U))
   {

@@ -60,11 +60,7 @@ typedef enum
    识别到**任何**视觉标志就亮这个颜色这么久，到期自动撤销，不鸣笛。
 
    优先级取最低（INDICATOR_PRIO_VISION）：入库闪灯、避障告警、急停都比它重要，
-   同时亮的时候让那些盖住它。所以这个提示是"没别的事时才看得到"。
-
-   ⚠️ 左侧 RGB 的 R/G 引脚在 main.h 里命名与实物相反，indicator.c 的
-      Indicator_WriteLeft() 已按引脚名做了补偿。若实车看到左右颜色不一致，
-      改那个函数，不要改这里的颜色宏。
+   同时亮的时候让那些盖住它。
    ============================================================================ */
 #define INDICATOR_VISION_COLOR    INDICATOR_GREEN
 #define INDICATOR_VISION_HOLD_MS  1000U

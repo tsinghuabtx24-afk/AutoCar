@@ -67,11 +67,9 @@ typedef enum
 /* 速度上限（百分比）*/
 #define MOTOR_SPEED_MAX      100U
 
-/* 死区上界：占空比**不超过**此值时电机堵转，只发出嗡嗡声而不转动。
-   注意是"不超过"而不是"低于" —— 50% 本身也是不转的，所以能动的
-   最小占空比是 MOTOR_SPEED_MIN + 1。
-   这个值同时被 car.h 用作 CAR_SPEED_BASE：车层所有速度运算都先减掉它、
-   在有效区间内按比例算、再加回来。实测出更准的阈值就改这一行。 */
+/* 死区上界：占空比**不超过**此值时电机堵转，只嗡嗡响不转动。是"不超过"而非
+   "低于"——50% 本身也不转，能动的最小占空比是 MOTOR_SPEED_MIN + 1。
+   car.h 用它作 CAR_SPEED_BASE，实测出更准的阈值就改这一行。 */
 #define MOTOR_SPEED_MIN      50U
 
 /* USER CODE END Private defines */

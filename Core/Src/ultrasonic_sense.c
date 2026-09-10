@@ -11,8 +11,8 @@
 
 #include <stdio.h>
 
-/* 采样周期必须留够 HC-SR04 的最小间隔，否则 Ultrasonic_Start() 会被反复拒绝，
-   实际采样率变成不可预期的值。改周期时这里会先报错，不用等上车发现。 */
+/* 采样周期不够长会让 Ultrasonic_Start() 被反复拒绝，实际采样率变得不可预期。
+   在这里拦住，不用等上车才发现。 */
 _Static_assert(ULTRASONIC_SENSE_PERIOD_MS >= ULTRASONIC_MIN_GAP_MS,
                "ULTRASONIC_SENSE_PERIOD_MS must be >= ULTRASONIC_MIN_GAP_MS, "
                "otherwise the previous burst is mistaken for this echo");
@@ -36,9 +36,9 @@ void UltrasonicSense_Restart(void)
 
 /**
   * @brief  推进超声波采样，只产生事件
-  * @note   全程非阻塞：到周期就发起一次测距，之后每轮推进状态机，回波到了
-  *         才判阈值。原实现调阻塞版 Ultrasonic_ReadMm()，空旷无回波时会卡
-  *         35ms，循迹的 10ms 控制周期被整整拖过三轮。
+  * @note   全程非阻塞：到周期发起测距，之后每轮推进状态机，回波到了才判阈值。
+  *         不能改回阻塞版 Ultrasonic_ReadMm()——空旷无回波时卡 35ms，会把循迹
+  *         的 10ms 控制周期整整拖过三轮。
   */
 void UltrasonicSense_Sense(void)
 {
@@ -46,15 +46,14 @@ void UltrasonicSense_Sense(void)
   uint16_t distance_mm;
   uint8_t  blocked;
 
-  /* ---- 空闲：到周期就发起下一次测距 ---- */
+  /* 空闲：到周期就发起下一次测距 */
   if (Ultrasonic_GetStatus() == ULTRASONIC_IDLE)
   {
     if ((uint32_t)(now - us_last_tick) < ULTRASONIC_SENSE_PERIOD_MS)
     {
       return;
     }
-    /* Start 可能因 HC-SR04 的 60ms 最小间隔被拒，那就下一轮再试，
-       不推进 us_last_tick。 */
+    /* 被最小间隔拒了就下一轮再试，故意不推进 us_last_tick。 */
     if (Ultrasonic_Start() != ULTRASONIC_BUSY)
     {
       return;
@@ -63,7 +62,7 @@ void UltrasonicSense_Sense(void)
     return;
   }
 
-  /* ---- 测距进行中：推进一步 ---- */
+  /* 测距进行中：推进一步 */
   switch (Ultrasonic_Step())
   {
     case ULTRASONIC_BUSY:
@@ -73,7 +72,7 @@ void UltrasonicSense_Sense(void)
       distance_mm = Ultrasonic_GetLastMm();
       us_last_mm  = distance_mm;
 
-      /* 迟滞：已判障碍时要退到 threshold+hyst 之外才算解除。 */
+      /* 迟滞：已判障碍时要退到 threshold+hyst 之外才解除。 */
       if (us_blocked != 0U)
       {
         blocked = (uint8_t)(distance_mm <

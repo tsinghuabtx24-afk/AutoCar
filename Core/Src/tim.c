@@ -684,9 +684,8 @@ static const Motor_Channel motor_ch[MOTOR_NUM] =
   * @brief  把速度百分比换算成比较寄存器的值
   * @param  speed: 0~100，0 表示停止
   * @retval 比较值 (0 ~ MOTOR_PWM_PERIOD)
-  * @note   MOTOR_SPEED_MIN 是**死区上界**：占空比不超过它电机就堵转不动。
-  *         所以非零速度被抬到 MOTOR_SPEED_MIN + 1 而不是 MOTOR_SPEED_MIN ——
-  *         抬到下限本身等于抬到"仍然不转"，那样这个保护就是空的。
+  * @note   非零速度抬到 MOTOR_SPEED_MIN + 1 而不是 MOTOR_SPEED_MIN：后者是死区
+  *         **上界**，抬到它等于抬到"仍然不转"，这个保护就白写了。
   */
 static uint32_t Motor_SpeedToPulse(uint8_t speed)
 {
@@ -705,9 +704,7 @@ static uint32_t Motor_SpeedToPulse(uint8_t speed)
   return (uint32_t)speed * MOTOR_PWM_PERIOD / MOTOR_SPEED_MAX;
 }
 
-/**
-  * @brief  同时设置一只电机 A/B 两相的占空比
-  */
+/** @brief 同时设置一只电机 A/B 两相的占空比 */
 static void Motor_SetPulse(Motor_ID motor, uint32_t pulse_a, uint32_t pulse_b)
 {
   if (motor >= MOTOR_NUM)
@@ -740,53 +737,33 @@ void Motor_Init(void)
   }
 }
 
-/**
-  * @brief  电机正转
-  * @param  motor: 电机编号 MOTOR_1 ~ MOTOR_4
-  * @param  speed: 速度百分比 0~100
-  * @note   A 相输出 PWM，B 相拉低
-  */
+/* 以下接口的 motor 取 MOTOR_1~MOTOR_4，speed 为速度百分比 0~100。 */
+
+/** @brief 正转：A 相输出 PWM，B 相拉低 */
 void Motor_Forward(Motor_ID motor, uint8_t speed)
 {
   Motor_SetPulse(motor, Motor_SpeedToPulse(speed), 0U);
 }
 
-/**
-  * @brief  电机反转
-  * @param  motor: 电机编号 MOTOR_1 ~ MOTOR_4
-  * @param  speed: 速度百分比 0~100
-  * @note   B 相输出 PWM，A 相拉低
-  */
+/** @brief 反转：B 相输出 PWM，A 相拉低 */
 void Motor_Backward(Motor_ID motor, uint8_t speed)
 {
   Motor_SetPulse(motor, 0U, Motor_SpeedToPulse(speed));
 }
 
-/**
-  * @brief  电机制动（能耗制动）
-  * @param  motor: 电机编号 MOTOR_1 ~ MOTOR_4
-  * @note   A/B 两相同时满占空比，电机两端被短接，转子被迅速刹住
-  */
+/** @brief 能耗制动：A/B 两相同时满占空比，电机两端短接，转子迅速刹住 */
 void Motor_Brake(Motor_ID motor)
 {
   Motor_SetPulse(motor, MOTOR_PWM_PERIOD, MOTOR_PWM_PERIOD);
 }
 
-/**
-  * @brief  电机断电滑行
-  * @param  motor: 电机编号 MOTOR_1 ~ MOTOR_4
-  * @note   A/B 两相都为 0，驱动器输出高阻，电机靠惯性自由停下
-  */
+/** @brief 断电滑行：A/B 两相都为 0，驱动器输出高阻，电机靠惯性停下 */
 void Motor_Coast(Motor_ID motor)
 {
   Motor_SetPulse(motor, 0U, 0U);
 }
 
-/**
-  * @brief  带符号速度控制，一个接口完成正反转
-  * @param  motor: 电机编号 MOTOR_1 ~ MOTOR_4
-  * @param  speed: -100~100，正数正转，负数反转，0 滑行
-  */
+/** @brief 带符号速度控制，speed 取 -100~100（正转/反转，0 滑行） */
 void Motor_SetSpeed(Motor_ID motor, int8_t speed)
 {
   if (speed > 0)
@@ -804,13 +781,11 @@ void Motor_SetSpeed(Motor_ID motor, int8_t speed)
 }
 
 /**
-  * @brief  带符号速度控制，不施加 MOTOR_SPEED_MIN 启动下限
-  * @param  motor: 电机编号 MOTOR_1 ~ MOTOR_4
-  * @param  speed: -100~100，正数正转，负数反转，0 滑行
-  * @note   转弯时内侧轮速度可能低于单只电机的启动下限，但整车由外侧轮
-  *         带动前进，内侧轮是被拖着转的，不存在堵转。此时若强行把内侧轮
-  *         抬到下限，内外轮速比会被破坏，转弯半径就不受控了。
-  *         协同运动用这个接口，单只电机独立驱动仍用 Motor_SetSpeed()。
+  * @brief  带符号速度控制，**不施加** MOTOR_SPEED_MIN 启动下限
+  * @note   转弯时内侧轮速度可能低于单只电机的启动下限，但整车由外侧轮带动、
+  *         内侧轮是被拖着转的，不存在堵转。强行把它抬到下限会破坏内外轮速比，
+  *         转弯半径就不受控了。所以协同运动用本接口，单只电机独立驱动仍用
+  *         Motor_SetSpeed()。
   */
 void Motor_SetSpeedRaw(Motor_ID motor, int8_t speed)
 {
@@ -832,9 +807,7 @@ void Motor_SetSpeedRaw(Motor_ID motor, int8_t speed)
   }
 }
 
-/**
-  * @brief  四只电机同时制动
-  */
+/** @brief 四只电机同时制动 */
 void Motor_BrakeAll(void)
 {
   for (Motor_ID m = MOTOR_1; m < MOTOR_NUM; m++)

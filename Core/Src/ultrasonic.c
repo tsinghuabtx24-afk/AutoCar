@@ -41,10 +41,9 @@ static void Ultrasonic_DelayUs(uint32_t us)
 
 /**
   * @brief  把 ECHO 引脚配成双边沿中断
-  * @note   不改 gpio.c：那是 CubeMX 生成的文件，重新生成会覆盖。EXTI12 当前
-  *         没有别的引脚占用（IR_IN 在 EXTI11，按键在 EXTI3/4/5），所以直接
-  *         在这里重配 PF12 不会抢掉谁的中断源。
-  *         EXTI15_10 的 NVIC 已由 MX_GPIO_Init 使能，无需重复。
+  * @note   在这里重配而不改 gpio.c，因为后者由 CubeMX 生成、重新生成会覆盖。
+  *         EXTI12 没有别的引脚占用（IR_IN 在 EXTI11，按键在 EXTI3/4/5），
+  *         不会抢掉谁的中断源；EXTI15_10 的 NVIC 已由 MX_GPIO_Init 使能。
   */
 static void Ultrasonic_EchoExtiInit(void)
 {
@@ -66,7 +65,7 @@ void Ultrasonic_Init(void)
   ultrasonic_got_echo       = 0U;
   ultrasonic_pulse_cyc      = 0U;
   ultrasonic_start_tick     = 0U;
-  /* 上电时让第一次测距立刻可发起，不用等一个 MIN_GAP。 */
+  /* 减掉一个 MIN_GAP，让上电后第一次测距立刻可发起。 */
   ultrasonic_last_done_tick = HAL_GetTick() - ULTRASONIC_MIN_GAP_MS;
   Ultrasonic_DwtInit();
   Ultrasonic_EchoExtiInit();
@@ -74,8 +73,7 @@ void Ultrasonic_Init(void)
 
 /**
   * @brief  ECHO 双边沿中断
-  * @note   中断里只打时间戳，不做除法、不 printf。上升沿记起点，下降沿算差值
-  *         并置标志，换算留给 Step。
+  * @note   中断里只打时间戳，不做除法、不 printf；换算留给 Step。
   */
 void Ultrasonic_EXTI_Callback(uint16_t GPIO_Pin)
 {
@@ -90,7 +88,7 @@ void Ultrasonic_EXTI_Callback(uint16_t GPIO_Pin)
 
   if (HAL_GPIO_ReadPin(ECHO_GPIO_Port, ECHO_Pin) == GPIO_PIN_SET)
   {
-    /* 上升沿：回波计时开始。 */
+    /* 上升沿：回波计时开始 */
     ultrasonic_rise_cyc = now;
     ultrasonic_got_rise = 1U;
     return;
@@ -125,8 +123,7 @@ Ultrasonic_Status Ultrasonic_Start(void)
   ultrasonic_start_tick = now;
   ultrasonic_status     = ULTRASONIC_BUSY;
 
-  /* TRIG：拉低 2us 稳定，再给 10us 高电平。HC-SR04 的时序要求，只能忙等，
-     但总共 12us，可忽略。 */
+  /* TRIG：拉低 2us 稳定 + 10us 高电平。HC-SR04 时序要求，只能忙等，共 12us。 */
   HAL_GPIO_WritePin(TRIG_GPIO_Port, TRIG_Pin, GPIO_PIN_RESET);
   Ultrasonic_DelayUs(2U);
   HAL_GPIO_WritePin(TRIG_GPIO_Port, TRIG_Pin, GPIO_PIN_SET);
@@ -147,7 +144,7 @@ Ultrasonic_Status Ultrasonic_Step(void)
     return ultrasonic_status;
   }
 
-  /* ---- 回波已到：换算 ---- */
+  /* 回波已到：换算 */
   if (ultrasonic_got_echo != 0U)
   {
     __disable_irq();
@@ -160,13 +157,13 @@ Ultrasonic_Status Ultrasonic_Step(void)
 
     ultrasonic_last_done_tick = HAL_GetTick();
 
-    /* 终态直接转 IDLE：Step 把终态返回给调用方一次就够了，状态变量不留
-       残余，GetStatus() 因此是无副作用的纯查询。语义与 Car_ActionStep 一致。 */
+    /* 终态直接转 IDLE：返回给调用方一次就够，状态变量不留残余，GetStatus()
+       因此是无副作用的纯查询。语义与 Car_ActionStep 一致。 */
     ultrasonic_status = ULTRASONIC_IDLE;
 
     if ((distance_mm == 0U) || (distance_mm > ULTRASONIC_MAX_MM))
     {
-      /* 超量程或零长脉冲：当作无效回波，别把鬼影当成近距离障碍。 */
+      /* 超量程或零长脉冲：无效回波，别把鬼影当成近距离障碍。 */
       ultrasonic_valid = 0U;
       return ULTRASONIC_TIMEOUT;
     }
@@ -176,7 +173,7 @@ Ultrasonic_Status Ultrasonic_Step(void)
     return ULTRASONIC_DONE;
   }
 
-  /* ---- 超时：ECHO 没来，或回波长得离谱 ---- */
+  /* 超时：ECHO 没来，或回波长得离谱 */
   if ((uint32_t)(HAL_GetTick() - ultrasonic_start_tick) >= ULTRASONIC_TIMEOUT_MS)
   {
     ultrasonic_got_rise       = 0U;
@@ -197,8 +194,7 @@ uint8_t Ultrasonic_IsValid(void) { return ultrasonic_valid; }
 
 /**
   * @brief  阻塞式单次测距（仅标定用）
-  * @note   Start + 循环 Step 直到终态。正式主循环不要调用：它会卡住调度器
-  *         最长 ULTRASONIC_TIMEOUT_MS + MIN_GAP。
+  * @note   正式主循环不要调用：最长会卡住调度器 ULTRASONIC_TIMEOUT_MS + MIN_GAP。
   */
 HAL_StatusTypeDef Ultrasonic_ReadMm(uint16_t *distance_mm)
 {
@@ -206,10 +202,10 @@ HAL_StatusTypeDef Ultrasonic_ReadMm(uint16_t *distance_mm)
 
   if (distance_mm == NULL) return HAL_ERROR;
 
-  /* 已有测距在跑（非阻塞路径正在用）就不插队。 */
+  /* 非阻塞路径正在用就不插队。 */
   if (ultrasonic_status != ULTRASONIC_IDLE) return HAL_BUSY;
 
-  /* 等够 HC-SR04 的最小间隔再发，否则 Start 会拒绝。 */
+  /* 等够最小间隔，否则 Start 会拒绝。 */
   while (Ultrasonic_Start() != ULTRASONIC_BUSY) { }
 
   do

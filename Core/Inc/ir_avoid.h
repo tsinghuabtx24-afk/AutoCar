@@ -4,13 +4,10 @@
   * @brief   双路红外避障传感器
   ******************************************************************************
   * @note    **本模块只是传感器。** 它采样、判阈值、判迟滞、产生障碍事件，
-  *          不驱动底盘、不控制蜂鸣和 RGB。避障动作在 avoid_task。
+  *          不驱动底盘、不控制蜂鸣和 RGB——避障动作在 avoid_task。
   *
-  *          原实现里 IrAvoid_Handle() 既采样又直接调 Car_BackwardDistance() /
-  *          Car_RotateRightAngle()，传感器兼执行器，违反分层，已移除。
-  *
-  *          采样不再用 HAL_Delay 等发射管稳定：改成相位状态机，
-  *          IrAvoid_Sense() 每轮推进一相，全程非阻塞。
+  *          等发射管稳定不用 HAL_Delay，而是拆成相位状态机由 IrAvoid_Sense()
+  *          每轮推进一相，全程非阻塞。
   ******************************************************************************
   */
 #ifndef __IR_AVOID_H__
@@ -57,14 +54,10 @@ typedef enum
 
 void IrAvoid_Init(void);
 
-/*
- * 推进采样状态机一步，非阻塞。状态发生变化时投递 EVENT_OBSTACLE_*。
- * 每轮主循环调用。
- */
+/* 每轮主循环调用，推进采样状态机一步（非阻塞）。状态变化时投 EVENT_OBSTACLE_*。 */
 void IrAvoid_Sense(void);
 
-/* 强制丢弃当前采样进度，下一轮重新开始一轮完整采样。
-   避障动作结束后调用，确保拿到的是动作后的新数据而不是动作前的残留。 */
+/* 丢弃当前采样进度重新开始。避障动作结束后调用，确保拿到的是动作后的新数据。 */
 void IrAvoid_Restart(void);
 
 IrAvoid_State IrAvoid_GetState(void);

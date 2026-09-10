@@ -19,12 +19,9 @@ static uint32_t avoid_start_tick;
 static uint32_t avoid_phase_tick;
 static uint8_t  avoid_attempts;
 static uint8_t  avoid_reverses;
-/* 本次转向方向：+1 左，-1 右。 */
-static int8_t   avoid_turn_dir;
-/* 绕行序列当前第几步。 */
-static uint8_t  avoid_step;
-/* 绕行镜像方向：+1 = 右绕（序列表原样），-1 = 左绕（每步转角取反）。 */
-static int8_t   avoid_detour_mirror;
+static int8_t   avoid_turn_dir;        /* +1 左，-1 右 */
+static uint8_t  avoid_step;            /* 绕行序列当前第几步 */
+static int8_t   avoid_detour_mirror;   /* +1 右绕（表原样），-1 左绕（转角取反） */
 
 const char *AvoidTask_StateName(AvoidTask_State state)
 {
@@ -53,17 +50,10 @@ void AvoidTask_Init(void)
   avoid_detour_mirror = 1;
 }
 
-/* ==== 固定绕行序列 ==========================================================
-   七步写成一张表而不是七段几乎相同的代码：加一步、改一个角度只动数据。
-   turn_deg10 非 0 表示这一步是旋转（正=左，负=右），否则是前进 forward_mm。
-
-   表里存的是**右绕**（先右转让开）。左绕不再写第二张表，而是把每一步的
-   turn_deg10 乘以 -1 镜像——两条路径的距离完全相同，只有转向符号相反。
-   镜像方向存在 avoid_detour_mirror：+1 = 右绕（表原样），-1 = 左绕。
-   ============================================================================ */
+/* 固定绕行序列，七步写成一张表 */
 typedef struct
 {
-  int32_t  turn_deg10;   /* 旋转角，正=左转，负=右转；0 表示这步是前进 */
+  int32_t  turn_deg10;   /* 旋转角，正=左转，负=右转；0 表示前进 */
   uint32_t forward_mm;   /* 前进距离，仅当 turn_deg10 == 0 时有意义 */
   const char *name;      /* 仅用于前进步的日志；旋转步的方向按镜像现算 */
 } AvoidTask_DetourStep;
@@ -81,8 +71,6 @@ static const AvoidTask_DetourStep avoid_detour[] =
 
 #define AVOID_DETOUR_STEPS  (sizeof(avoid_detour) / sizeof(avoid_detour[0]))
 
-/* 序列必须回到原朝向、原横向位置，否则绕完接不回原来那条线。
-   两次右转 + 两次左转，代数和为 0；两段 400mm 长度相同，横向偏出恰好抵消。 */
 _Static_assert(AVOID_DETOUR_STEPS == 7U, "detour sequence must have 7 steps");
 
 /**
@@ -101,7 +89,7 @@ static uint8_t AvoidTask_StartDetourStep(uint8_t step)
   }
   s = &avoid_detour[step];
 
-  /* 左绕时把转角取反。距离步不受影响——两条路径长度相同。 */
+  /* 左绕时转角取反；距离步不受影响。 */
   turn = s->turn_deg10 * (int32_t)avoid_detour_mirror;
 
   if (turn != 0)
@@ -119,7 +107,7 @@ static uint8_t AvoidTask_StartDetourStep(uint8_t step)
     return 0U;
   }
 
-  /* 表里的 name 写的是右绕，左绕时左右要反过来报，否则日志会骗人。 */
+  /* 表里的 name 写的是右绕，左绕时左右反过来报。 */
   printf("[AVOID] detour step %u/%u: %s\r\n",
          (unsigned)(step + 1U), (unsigned)AVOID_DETOUR_STEPS,
          (turn != 0)
@@ -132,11 +120,8 @@ static uint8_t AvoidTask_StartDetourStep(uint8_t step)
   * @brief  按两侧红外原始值选一个更空旷的方向
   * @retval +1 向左转，-1 向右转
   *
-  * @note   取代原来的伪随机选向。ADC 语义由 IR_AVOID_OBSTACLE_WHEN_HIGH 决定：
-  *         为 0 时值越小越近，所以"更空旷"= 原始值更大的一侧。
-  *
-  * @note   两侧读数接近时固定偏右转（返回 -1），保证行为可复现。真要偏好某侧
-  *         改这里一处即可。
+  * @note   取代原来的伪随机选向。ADC 语义由 IR_AVOID_OBSTACLE_WHEN_HIGH 决定。
+  *         两侧读数接近时固定偏右转，保证行为可复现；要改偏好只动这一处。
   */
 static int8_t AvoidTask_ChooseDirection(void)
 {
@@ -152,27 +137,21 @@ static int8_t AvoidTask_ChooseDirection(void)
 #endif
 }
 
-/**
-  * @brief  当前是否仍被挡住
-  */
+/** @brief 当前是否仍被挡住 */
 static uint8_t AvoidTask_StillBlocked(void)
 {
   return (uint8_t)((IrAvoid_IsAnyBlocked() != 0U) ||
                    (UltrasonicSense_IsBlocked() != 0U));
 }
 
-/**
-  * @brief  需不需要先后退：正前方受阻或左右同时受阻时，直接转向容易剐蹭
-  */
+/** @brief 需不需要先后退：正前方或左右同时受阻时直接转向容易剐蹭 */
 static uint8_t AvoidTask_NeedsReverse(void)
 {
   return (uint8_t)((UltrasonicSense_IsBlocked() != 0U) ||
                    (IrAvoid_GetState() == IR_AVOID_BOTH));
 }
 
-/**
-  * @brief  进入某一相位
-  */
+/** @brief 进入某一相位 */
 static void AvoidTask_EnterPhase(AvoidTask_State state)
 {
   avoid_state      = state;
@@ -181,10 +160,6 @@ static void AvoidTask_EnterPhase(AvoidTask_State state)
          AvoidTask_StateName(state), (unsigned)avoid_attempts);
 }
 
-/**
-  * @brief  发起本轮的避障动作
-  * @note   单侧受阻只需小角度轻推；正前方或双侧受阻先后退再大角度转。
-  */
 #if AVOID_STRATEGY_DETOUR
 
 /**
@@ -192,13 +167,7 @@ static void AvoidTask_EnterPhase(AvoidTask_State state)
   * @retval +1 = 右绕（先右转让开），-1 = 左绕，0 = 不该绕行
   *
   * @note   往障碍的**反侧**绕：左方受阻走右绕，右方受阻走左绕。
-  *
-  * @note   判定顺序是刻意的：
-  *           - 左右同时受阻（IR_AVOID_BOTH）时两侧都没空间，固定右绕并接受
-  *             它可能不成功——绕不开的话序列走完传感器会重新触发。总得选一个，
-  *             选固定值是为了行为可复现（同一处障碍每次表现一致，便于调试）。
-  *           - 只有超声波报前方、红外两侧都空时也走右绕：正前方障碍往哪边绕
-  *             都行，固定右绕同样是为了可复现。
+  *         其余情况（双侧受阻、或只有超声波报前方）固定右绕：
   */
 static int8_t AvoidTask_DetourDirection(void)
 {
@@ -224,14 +193,16 @@ static int8_t AvoidTask_DetourDirection(void)
 
 #endif /* AVOID_STRATEGY_DETOUR */
 
+/**
+  * @brief  发起本轮的避障动作（旧策略）
+  * @note   单侧受阻只需小角度轻推；正前方或双侧受阻先后退再大角度转。
+  */
 static void AvoidTask_StartAttempt(void)
 {
   IrAvoid_State ir = IrAvoid_GetState();
 
-  /* 不设上限：持续重试直到脱困。障碍是暂时的，失败不算故障。 */
   avoid_attempts++;
 
-  /* 后退次数有上限，避免正对墙时反复倒退累计出很远的位移。 */
   if ((AvoidTask_NeedsReverse() != 0U) &&
       (avoid_reverses < AVOID_MAX_REVERSES))
   {
@@ -247,8 +218,7 @@ static void AvoidTask_StartAttempt(void)
     return;
   }
 
-  /* 单侧受阻：往反方向轻推。左侧有障碍就右转，右侧有障碍就左转。
-     双侧受阻但后退次数已用尽时按读数择路，不能再靠"哪侧有障碍"判断。 */
+  /* 单侧受阻往反方向轻推；双侧受阻且后退次数已用尽时按读数择路。 */
   if (ir == IR_AVOID_LEFT)
   {
     avoid_turn_dir = -1;
@@ -279,8 +249,7 @@ void AvoidTask_Begin(void)
   avoid_attempts   = 0U;
   avoid_reverses   = 0U;
 
-  /* 告警覆盖整个避障过程，结束时释放。左右侧红灯指示受阻方向。 */
-  /* 告警覆盖整个避障过程。蜂鸣持续——避障时车在动，需要持续提醒周围的人。 */
+  /* 告警覆盖整个避障过程，结束时释放。左右红灯指示受阻方向；蜂鸣持续 */
   Indicator_Request(INDICATOR_PRIO_AVOID, INDICATOR_BUZZER_ON,
                     (IrAvoid_IsLeftBlocked()  != 0U) ? INDICATOR_RED : INDICATOR_OFF,
                     (IrAvoid_IsRightBlocked() != 0U) ? INDICATOR_RED : INDICATOR_OFF,
@@ -310,8 +279,7 @@ void AvoidTask_Begin(void)
       return;
     }
 
-    /* 传感器已恢复无障碍（事件到达与本函数之间隔了至少一轮采样）。
-       没有障碍就不必绕，直接交还控制权。 */
+    /* 事件到达与本函数之间隔了至少一轮采样，障碍可能已消失：不必绕。 */
     printf("[AVOID] no obstacle at begin, hand back\r\n");
     avoid_state = AVOID_DONE;
     return;
@@ -333,9 +301,7 @@ void AvoidTask_Cancel(void)
   avoid_step  = 0U;
 }
 
-/**
-  * @brief  结束避障，交还控制权
-  */
+/** @brief 结束避障，交还控制权 */
 static uint8_t AvoidTask_Finish(uint8_t success)
 {
   Car_Stop();
@@ -343,7 +309,7 @@ static uint8_t AvoidTask_Finish(uint8_t success)
   avoid_state = AVOID_IDLE;
   avoid_step  = 0U;
 
-  /* 让传感器丢掉动作前的残留判定，下一轮重新采。 */
+  /* 传感器丢掉动作前的残留判定，下一轮重新采。 */
   IrAvoid_Restart();
   UltrasonicSense_Restart();
 
@@ -360,11 +326,7 @@ uint8_t AvoidTask_Step(void)
     return 0U;
   }
 
-  /* 总超时兜底，防止卡在某一相。**不报故障**：只是结束本轮，交还控制权。
-     障碍若仍在，传感器下一轮会重新触发避障，等于自动重来。
-
-     绕行序列用自己的（更短的）超时：它是开环的固定路径，理论耗时可算，
-     卡住就该早点结束，不必等 15 秒。 */
+  /* 总超时兜底，防止卡在某一相。不报故障，语义见 avoid_task.h。 */
   {
     uint32_t limit = (avoid_state == AVOID_DETOUR) ? AVOID_DETOUR_TIMEOUT_MS
                                                    : AVOID_TOTAL_TIMEOUT_MS;
@@ -389,9 +351,7 @@ uint8_t AvoidTask_Step(void)
           avoid_step++;
           if (avoid_step >= AVOID_DETOUR_STEPS)
           {
-            /* 七步走完。朝向与横向都已回到原样，直接交还控制权让循迹接上。
-               不判断障碍是否还在——固定序列的定义就是走完这条路径；障碍若还
-               挡着，传感器下一轮会重新触发。 */
+            /* 朝向与横向都已回正，交还控制权让循迹接上。不判断障碍是否还在。 */
             printf("[AVOID] detour complete\r\n");
             return AvoidTask_Finish(1U);
           }
@@ -403,8 +363,8 @@ uint8_t AvoidTask_Step(void)
           break;
 
         default:
-          /* 某一步超时或失败：car 已制动。序列做半截意味着车身姿态不确定，
-             不再往下走，交还控制权由循迹重新找线。 */
+          /* 某步超时或失败，car 已制动。做半截的序列意味着姿态不确定，不再
+             往下走，交还控制权由循迹重新找线。 */
           printf("[AVOID] detour step %u failed\r\n", (unsigned)avoid_step);
           return AvoidTask_Finish(0U);
       }
@@ -417,7 +377,7 @@ uint8_t AvoidTask_Step(void)
           break;
 
         case CAR_ACTION_DONE:
-          /* 退够了。此时才有空间转向，方向按两侧读数择路。 */
+          /* 退够了，此时才有空间转向。 */
           avoid_turn_dir = AvoidTask_ChooseDirection();
           if (Car_StartRotateAngle(AVOID_ROTATE_SPEED,
                                    (int32_t)avoid_turn_dir *
@@ -454,8 +414,7 @@ uint8_t AvoidTask_Step(void)
       break;
 
     case AVOID_VERIFY:
-      /* 停着等传感器出新数据。IrAvoid_Restart() 在这里不调，否则
-         HasSample 一直为 0；只需等够一轮采样周期。 */
+      /* 停着等一轮采样。这里**不能**调 IrAvoid_Restart()，否则 HasSample 恒为 0。 */
       Car_Stop();
       if ((uint32_t)(now - avoid_phase_tick) < AVOID_VERIFY_MS)
       {
