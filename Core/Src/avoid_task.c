@@ -83,11 +83,11 @@ typedef struct
 
 static const AvoidTask_DetourStep avoid_detour[] =
 {
-  { -(int32_t)AVOID_DETOUR_TURN_DEG10 + 100, 0U,                    NULL          },
+  { -(int32_t)AVOID_DETOUR_TURN_DEG10 + 150, 0U,                    NULL          },
   { 0,                                 AVOID_DETOUR_LONG_MM,  "forward 300" },
   {  (int32_t)AVOID_DETOUR_TURN_DEG10 - 100, 0U,                    NULL          },
   { 0,                                 AVOID_DETOUR_CROSS_MM, "forward 500" },
-  {  (int32_t)AVOID_DETOUR_TURN_DEG10 - 100, 0U,                    NULL          },
+  {  (int32_t)AVOID_DETOUR_TURN_DEG10 - 50, 0U,                    NULL          },
   /* 末段不在表里：最后一次左转之后转入 AVOID_CRUISE，持续前进到见线。 */
 };
 
