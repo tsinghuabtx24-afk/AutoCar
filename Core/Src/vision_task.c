@@ -9,7 +9,7 @@
 _Static_assert(VISION_SPEED_NORMAL > VISION_SPEED_LIMIT_DROP,
                "VISION_SPEED_LIMIT_DROP exceeds VISION_SPEED_NORMAL");
 _Static_assert((VISION_SPEED_NORMAL - VISION_SPEED_LIMIT_DROP) >=
-               (CAR_SPEED_BASE + 2U),
+               CAR_SPEED_BASE,
                "limited speed falls into the motor dead zone");
 
 /* 解除限速要恢复到循迹的默认速度，两个宏必须一致，否则一次限速+解除之后

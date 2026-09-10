@@ -64,14 +64,14 @@ extern "C" {
      2. 再看缓弯是否切内道，不够就加大；
      3. 最后才逐步提 LINE_BASE_SPEED。
    ============================================================================ */
-#define LINE_BASE_SPEED          60U
+#define LINE_BASE_SPEED          58U
 
 /* 一档修正的左右轮速度差。2 档用 ×2，3 档改走原地转。 */
 #define LINE_DIFF_STEP           4U
 
 /* 大偏差原地转，极左/极右图案时启用。不受 CAR_ANGLE_MIN_SPEED 限制：这里不按
    角度停而是边转边看传感器，与 car 的滑移补偿无关。 */
-#define LINE_PIVOT_SPEED         75U
+#define LINE_PIVOT_SPEED         70U
 
 /* 原地转的超时保护。转这么久还没压回线就判丢线并制动。 */
 #define LINE_PIVOT_TIMEOUT_MS    2500U
