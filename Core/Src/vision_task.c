@@ -294,28 +294,18 @@ static void VisionTask_RunPark1(void)
 }
 
 /**
-  * @brief  2 号库：立即前进 VISION_PARK2_BOOST_MS，然后交回循迹
-  * @note   **没有闪灯相位**：识别到 2 号库就是"起步"信号，先停着闪 2s 灯与
-  *         "从库里开出去"的语义相反，已整段删除（原 VisionTask_RunBlink 调用）。
-  *
-  * @note   起步速度见 VISION_PARK2_FULL_SPEED：默认用停在 1 号库之前的速度，
-  *         不是满速——满速会把限速吞掉，也容易一起步就冲出赛道。
+  * @brief  2 号库：设置起步速度后立刻交回循迹
+  * @note   不再用 Car_ForwardRun() 盲走一段：那段时间 VisionTask_Step() 返回 1，
+  *         底盘被视觉任务独占，循迹完全没有机会介入，弯道必冲出赛道。
+  *         现在改成把"停在 1 号库前的速度"写进循迹基速，然后 VisionTask_Finish()
+  *         交回底盘，由 LineTracker_Step() 从当前姿态继续走。
   */
 static void VisionTask_RunPark2(void)
 {
-  uint32_t now = HAL_GetTick();
+  uint8_t resume = (task_resume_speed != 0U) ? task_resume_speed : task_speed;
 
-#if VISION_PARK2_FULL_SPEED
-  Car_ForwardRun(VISION_SPEED_FULL);
-#else
-  /* 停在 1 号库之前的速度；没经过 1 号库直接来的 2 号库就用当前巡线速度。 */
-  Car_ForwardRun((task_resume_speed != 0U) ? task_resume_speed : task_speed);
-#endif
-
-  if ((uint32_t)(now - task_phase_tick) >= VISION_PARK2_BOOST_MS)
-  {
-    VisionTask_Finish();
-  }
+  LineTracker_SetBaseSpeed(resume);
+  VisionTask_Finish();
 }
 
 /**
