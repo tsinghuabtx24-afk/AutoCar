@@ -30,6 +30,8 @@ static Event_Type VisionUart_TargetToEvent(Vision_Target target)
     case VISION_TARGET_HORN:          return EVENT_VISION_HORN;
     case VISION_TARGET_PARK_1:        return EVENT_VISION_PARK_1;
     case VISION_TARGET_PARK_2:        return EVENT_VISION_PARK_2;
+    /* 第 8 类走同一个鸣笛事件 */
+    case VISION_TARGET_HORN_2:        return EVENT_VISION_HORN;
     default:                          return EVENT_NONE;
   }
 }
@@ -45,6 +47,7 @@ static Vision_Target VisionUart_IdToTarget(uint8_t id)
     case 4U: return VISION_TARGET_HORN;
     case 5U: return VISION_TARGET_PARK_1;
     case 6U: return VISION_TARGET_PARK_2;
+    case 7U: return VISION_TARGET_HORN_2;
     default: return (Vision_Target)0xFFU;
   }
 }
@@ -183,6 +186,7 @@ const char *VisionUart_TargetName(Vision_Target target)
     case VISION_TARGET_HORN: return "HORN";
     case VISION_TARGET_PARK_1: return "PARK_1";
     case VISION_TARGET_PARK_2: return "PARK_2";
+    case VISION_TARGET_HORN_2: return "HORN_2";
     default: return "UNKNOWN";
   }
 }

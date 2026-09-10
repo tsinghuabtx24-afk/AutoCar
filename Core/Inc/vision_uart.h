@@ -25,7 +25,10 @@ typedef enum
   VISION_TARGET_TURN_RIGHT,
   VISION_TARGET_HORN,
   VISION_TARGET_PARK_1,
-  VISION_TARGET_PARK_2
+  VISION_TARGET_PARK_2,
+
+  /* 第 8 类（线上 id 7）。动作：停车鸣两声。单独立一个类别而不是复用 id 4 */
+  VISION_TARGET_HORN_2
 } Vision_Target;
 
 typedef struct
