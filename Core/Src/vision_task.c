@@ -22,9 +22,6 @@ static uint32_t task_start_tick;
 static uint32_t task_phase_tick;
 static uint8_t task_phase;
 static uint8_t task_speed;
-/* 停在 1 号库那一刻的速度快照，2 号库起步时用它。
-   0 = 没有快照（没经过 1 号库、直接来的 2 号库），此时退回当前巡线速度。 */
-static uint8_t task_resume_speed;
 
 /* ---- 鸣笛：独立于 task_state 的一条小状态机 ----
    鸣笛不占底盘，和任何任务（乃至循迹、避障）并行，所以不能占用 task_state。 */
@@ -86,8 +83,6 @@ static void VisionTask_Finish(void)
   VisionTask_Buzzer(0U);
   task_state = VISION_TASK_IDLE;
   task_phase = 0U;
-  /* 快照已消费，清掉：否则以后单独来一次 2 号库会拿着很久以前的值起步。 */
-  task_resume_speed = 0U;
   printf("[VTASK] done, speed=%u\r\n", (unsigned)task_speed);
 }
 
@@ -98,7 +93,6 @@ void VisionTask_Init(void)
   task_phase_tick = 0U;
   task_phase = 0U;
   task_speed = VISION_SPEED_NORMAL;
-  task_resume_speed = 0U;
   horn_active = 0U;
   horn_phase = 0U;
   horn_phase_tick = 0U;
@@ -170,7 +164,7 @@ uint8_t VisionTask_Begin(Event_Type type)
       /* 限速：在正常速度基础上降低固定占空比。
          下限保护交给 LineTracker_SetBaseSpeed()——那里才知道死区和差速需要
          多少余量，在这里判 0 反而会算出一个电机根本不转的值。 */
-      task_speed = (uint8_t)(VISION_SPEED_NORMAL - VISION_SPEED_LIMIT_DROP);
+      task_speed = VISION_SPEED_LIMITED;
       printf("[VTASK] speed limited to %u\r\n", (unsigned)task_speed);
       return 0U;
 
@@ -197,7 +191,16 @@ uint8_t VisionTask_Begin(Event_Type type)
       horn_active     = 1U;
       horn_phase      = 0U;
       horn_phase_tick = HAL_GetTick();
-      printf("[VTASK] horn (no stop)\r\n");
+
+      /* 鸣笛之后按减速档行驶，与限速标志同一个档位。返回 0 之后调度器会把
+         task_speed 同步到循迹基速（见 scheduler.c 的 SetBaseSpeed 调用），
+         所以这里只改变量，不直接写循迹。
+
+         降速是**持续**的，不随两声鸣笛结束而恢复：恢复只由"解除限速"标志或
+         绿灯起步触发。 */
+      task_speed = VISION_SPEED_LIMITED;
+      printf("[VTASK] horn (no stop), speed limited to %u\r\n",
+             (unsigned)task_speed);
       return 0U;
 
     case EVENT_VISION_PARK_1:
@@ -275,7 +278,7 @@ static uint8_t VisionTask_RunBlink(void)
 }
 
 /**
-  * @brief  1 号库：闪灯后停车并保持停止
+  * @brief  红灯（1 号库）：闪灯后停车并保持停止，直到绿灯
   */
 static void VisionTask_RunPark1(void)
 {
@@ -285,26 +288,31 @@ static void VisionTask_RunPark1(void)
     return;
   }
   VisionTask_Buzzer(0U);
-  /* 在**停下这一刻**取速度快照，而不是等 2 号库来了再读 task_speed：停在库里
-     期间如果又收到限速标志，task_speed 会变，而需求要的是"停止前"那个值。 */
-  task_resume_speed = task_speed;
   task_state = VISION_TASK_STOPPED;
-  printf("[VTASK] parked at 1, waiting for PARK_2 (resume speed %u)\r\n",
-         (unsigned)task_resume_speed);
+  printf("[VTASK] red light, stopped, waiting for green\r\n");
 }
 
 /**
-  * @brief  2 号库：设置起步速度后立刻交回循迹
+  * @brief  绿灯（2 号库）：设置起步速度后立刻交回循迹
   * @note   不再用 Car_ForwardRun() 盲走一段：那段时间 VisionTask_Step() 返回 1，
   *         底盘被视觉任务独占，循迹完全没有机会介入，弯道必冲出赛道。
-  *         现在改成把"停在 1 号库前的速度"写进循迹基速，然后 VisionTask_Finish()
-  *         交回底盘，由 LineTracker_Step() 从当前姿态继续走。
+  *         现在改成把起步速度写进循迹基速，然后 VisionTask_Finish() 交回底盘，
+  *         由 LineTracker_Step() 从当前姿态继续走。
+  *
+  * @note   起步速度是**正常速度**，不是停之前那个速度。红灯前若因鸣笛或限速
+  *         标志处在减速档，绿灯起步一并解除——见 VISION_PARK2_FULL_SPEED 注释。
+  *         task_speed 也要一起改回去，否则下一个视觉事件会把减速档又同步下去。
   */
 static void VisionTask_RunPark2(void)
 {
-  uint8_t resume = (task_resume_speed != 0U) ? task_resume_speed : task_speed;
+#if VISION_PARK2_FULL_SPEED
+  task_speed = VISION_SPEED_FULL;
+#else
+  task_speed = VISION_SPEED_NORMAL;
+#endif
 
-  LineTracker_SetBaseSpeed(resume);
+  LineTracker_SetBaseSpeed(task_speed);
+  printf("[VTASK] green light, start at %u\r\n", (unsigned)task_speed);
   VisionTask_Finish();
 }
 
@@ -390,8 +398,6 @@ void VisionTask_Cancel(void)
   VisionTask_Buzzer(0U);
   task_state = VISION_TASK_IDLE;
   task_phase = 0U;
-  /* 急停/被抢占时整个任务作废，快照一起丢掉。 */
-  task_resume_speed = 0U;
   /* 鸣笛虽然不占底盘，但急停要静音——那时蜂鸣器归故障告警用。 */
   horn_active = 0U;
 }
