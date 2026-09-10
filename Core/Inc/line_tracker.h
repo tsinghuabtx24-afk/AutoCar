@@ -71,7 +71,7 @@ extern "C" {
      2. 再看缓弯是否切内道，不够就加大；
      3. 最后才逐步提 LINE_BASE_SPEED。
    ============================================================================ */
-#define LINE_BASE_SPEED          75U
+#define LINE_BASE_SPEED          72U
 
 /* 一档修正的左右轮速度差。2 档用 ×2，3 档改走原地转。 */
 #define LINE_DIFF_STEP           7U
