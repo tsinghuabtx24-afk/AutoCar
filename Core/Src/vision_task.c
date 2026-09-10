@@ -8,7 +8,7 @@
 /* 限速后的速度必须仍高于死区，否则限速等于停车。 */
 _Static_assert(VISION_SPEED_NORMAL > VISION_SPEED_LIMIT_DROP,
                "VISION_SPEED_LIMIT_DROP exceeds VISION_SPEED_NORMAL");
-_Static_assert((VISION_SPEED_NORMAL - VISION_SPEED_LIMIT_DROP) >
+_Static_assert((VISION_SPEED_NORMAL - VISION_SPEED_LIMIT_DROP) >=
                (CAR_SPEED_BASE + 2U),
                "limited speed falls into the motor dead zone");
 

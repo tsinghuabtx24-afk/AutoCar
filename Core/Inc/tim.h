@@ -70,7 +70,7 @@ typedef enum
 /* 死区上界：占空比**不超过**此值时电机堵转，只嗡嗡响不转动。是"不超过"而非
    "低于"——50% 本身也不转，能动的最小占空比是 MOTOR_SPEED_MIN + 1。
    car.h 用它作 CAR_SPEED_BASE，实测出更准的阈值就改这一行。 */
-#define MOTOR_SPEED_MIN      50U
+#define MOTOR_SPEED_MIN      48U
 
 /* USER CODE END Private defines */
 

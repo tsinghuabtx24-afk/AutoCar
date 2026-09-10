@@ -13,7 +13,7 @@ extern "C" {
    巡线默认速度与限速后的速度。速度刻度沿用 car 模块的 0~100 占空比刻度。
    ============================================================================ */
 #define VISION_SPEED_NORMAL        60U
-#define VISION_SPEED_LIMIT_DROP    7U
+#define VISION_SPEED_LIMIT_DROP    10U
 #define VISION_SPEED_FULL          100U
 
 /* 减速档。限速标志与**鸣笛标志**都用它，写成宏避免三处重复同一个表达式。 */
