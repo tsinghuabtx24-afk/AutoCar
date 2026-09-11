@@ -214,8 +214,9 @@ uint8_t VisionNav_OnVisionEvent(Event_Type type)
   {
     vnav_turn_dir      = (type == EVENT_VISION_TURN_LEFT) ? 1 : -1;
     vnav_maneuver_tick = HAL_GetTick();
-    printf("[VNAV] turn signal %s -> maneuver armed\r\n",
-           (vnav_turn_dir > 0) ? "LEFT" : "RIGHT");
+    printf("[VNAV] turn signal %s -> maneuver armed (silent %ums)\r\n",
+           (vnav_turn_dir > 0) ? "LEFT" : "RIGHT",
+           (unsigned)VNAV_TURN_SILENCE_MS);
     VisionNav_Enter(VNAV_TURN_1_WAIT);
     return 0U;   /* 不交给 vision_task 执行 */
   }
@@ -296,6 +297,16 @@ uint8_t VisionNav_TakeTurnRequest(int32_t *deg10)
   {
     return 0U;
   }
+
+#if (VNAV_TURN_SILENCE_MS > 0U)
+  /* 第一段的静默期：刚识别到转向信号，先不看图案。*/
+  if ((vnav_state == VNAV_TURN_1_WAIT) &&
+      ((uint32_t)(HAL_GetTick() - vnav_phase_tick) <
+       (uint32_t)VNAV_TURN_SILENCE_MS))
+  {
+    return 0U;
+  }
+#endif
 
   /* 图案由 line_tracker 在同一周期内先调 OnPattern() 存进来。 */
   pattern = vnav_last_pattern;
