@@ -34,6 +34,19 @@ static uint32_t horn_phase_tick;
 static uint8_t task_alert_on;
 static uint8_t task_buzzer_on;
 
+/* ---- 1 号库停车兜底 ----
+   进入停止态的时刻，喂 VISION_PARK1_MAX_STOP_MS。不能复用 task_start_tick：
+   那个是任务（含 2s 闪灯）的起点，用它算出的"停车时长"会多算闪灯那 2s。 */
+static uint32_t stop_enter_tick;
+
+/* 超时自动起步后压制 1 号库信号的窗口起点；0 = 窗口未激活。 */
+static uint32_t park1_ignore_tick;
+static uint8_t  park1_ignore_active;
+
+/* 本次上电已执行过几次 1 号库，喂 VISION_PARK1_MAX_EXEC。
+   **只在 VisionTask_Init() 清零**：急停不清，所以"整局一次"是按上电算的。 */
+static uint8_t park1_exec_count;
+
 static void VisionTask_Apply(void)
 {
   if ((task_alert_on == 0U) && (task_buzzer_on == 0U))
@@ -96,6 +109,11 @@ void VisionTask_Init(void)
   horn_active = 0U;
   horn_phase = 0U;
   horn_phase_tick = 0U;
+  stop_enter_tick = 0U;
+  park1_ignore_tick = 0U;
+  park1_ignore_active = 0U;
+  /* 这里是唯一的清零点：一次上电给一次入库机会。 */
+  park1_exec_count = 0U;
   VisionTask_Alert(0U);
   VisionTask_Buzzer(0U);
 }
@@ -114,6 +132,40 @@ const char *VisionTask_StateName(VisionTask_State state)
     case VISION_TASK_STOPPED: return "STOPPED";
     default: return "IDLE";
   }
+}
+
+/**
+  * @brief  1 号库信号现在该被压制吗？
+  * @retval 1=压制，这次识别不入库
+  *
+  * @note   两道闸门：整局次数用完（VISION_PARK1_MAX_EXEC），或刚超时起步、车还
+  *         没驶离那块红灯牌（VISION_PARK1_RESTART_IGNORE_MS）。
+  */
+static uint8_t VisionTask_Park1Suppressed(void)
+{
+#if (VISION_PARK1_MAX_EXEC > 0U)
+  if (park1_exec_count >= (uint8_t)VISION_PARK1_MAX_EXEC)
+  {
+    printf("[VTASK] ignore PARK_1 (already done %u this run)\r\n",
+           (unsigned)park1_exec_count);
+    return 1U;
+  }
+#endif
+
+#if (VISION_PARK1_MAX_STOP_MS > 0U) && (VISION_PARK1_RESTART_IGNORE_MS > 0U)
+  if (park1_ignore_active == 0U)
+  {
+    return 0U;
+  }
+  if ((uint32_t)(HAL_GetTick() - park1_ignore_tick) <
+      (uint32_t)VISION_PARK1_RESTART_IGNORE_MS)
+  {
+    printf("[VTASK] ignore PARK_1 (just restarted from it)\r\n");
+    return 1U;
+  }
+  park1_ignore_active = 0U;
+#endif
+  return 0U;
 }
 
 /**
@@ -205,6 +257,11 @@ uint8_t VisionTask_Begin(Event_Type type)
 
     case EVENT_VISION_PARK_1:
       if (acceptable == 0U) return 0U;
+      /* 整局次数用完、或刚从这块红灯牌超时起步：都不入库。 */
+      if (VisionTask_Park1Suppressed() != 0U) return 0U;
+      /* 在**开始执行**时记账。放到执行完（RunPark1 转 STOPPED）会漏计急停打断
+         的那次，那次已经停过车了，不该再给一次机会。 */
+      if (park1_exec_count < 0xFFU) park1_exec_count++;
       VisionTask_Start(VISION_TASK_PARK_1);
       return 1U;
 
@@ -278,7 +335,31 @@ static uint8_t VisionTask_RunBlink(void)
 }
 
 /**
-  * @brief  红灯（1 号库）：闪灯后停车并保持停止，直到绿灯
+  * @brief  从停止态起步：设置起步速度并交回循迹
+  * @param  reason 打印用的起步原因（"green light" / "stop timeout"）
+  *
+  * @note   绿灯起步与 1 号库超时起步共用这一段，**速度必然一致**——需求就是
+  *         "超时后走 2 号库同样的速度"，写成两处早晚会调歪一处。
+  *
+  * @note   起步速度是**正常速度**，不是停之前那个速度。红灯前若因鸣笛或限速
+  *         标志处在减速档，起步一并解除——见 VISION_PARK2_FULL_SPEED 注释。
+  *         task_speed 也要一起改回去，否则下一个视觉事件会把减速档又同步下去。
+  */
+static void VisionTask_StartRolling(const char *reason)
+{
+#if VISION_PARK2_FULL_SPEED
+  task_speed = VISION_SPEED_FULL;
+#else
+  task_speed = VISION_SPEED_NORMAL;
+#endif
+
+  LineTracker_SetBaseSpeed(task_speed);
+  printf("[VTASK] %s, start at %u\r\n", reason, (unsigned)task_speed);
+  VisionTask_Finish();
+}
+
+/**
+  * @brief  红灯（1 号库）：闪灯后停车并保持停止，等绿灯或等超时
   */
 static void VisionTask_RunPark1(void)
 {
@@ -288,8 +369,39 @@ static void VisionTask_RunPark1(void)
     return;
   }
   VisionTask_Buzzer(0U);
-  task_state = VISION_TASK_STOPPED;
+  task_state      = VISION_TASK_STOPPED;
+  stop_enter_tick = HAL_GetTick();
+#if (VISION_PARK1_MAX_STOP_MS > 0U)
+  printf("[VTASK] red light, stopped, waiting for green (max %ums)\r\n",
+         (unsigned)VISION_PARK1_MAX_STOP_MS);
+#else
   printf("[VTASK] red light, stopped, waiting for green\r\n");
+#endif
+}
+
+/**
+  * @brief  停止态推进：等绿灯，等不到就到期自己走
+  * @retval 1=仍占用底盘（继续停），0=已起步，底盘交回循迹
+  *
+  * @note   绿灯来了走的是 VisionTask_Begin → PARK_2 那条路，不在这里。
+  */
+static uint8_t VisionTask_RunStopped(void)
+{
+  Car_Stop();
+
+#if (VISION_PARK1_MAX_STOP_MS > 0U)
+  if ((uint32_t)(HAL_GetTick() - stop_enter_tick) >=
+      (uint32_t)VISION_PARK1_MAX_STOP_MS)
+  {
+    /* 起步后车还在红灯牌跟前，先把 1 号库压住再走，否则下一帧就被停回来。 */
+    park1_ignore_tick   = HAL_GetTick();
+    park1_ignore_active = 1U;
+    VisionTask_StartRolling("no green in time");
+    return 0U;
+  }
+#endif
+
+  return 1U;
 }
 
 /**
@@ -299,21 +411,14 @@ static void VisionTask_RunPark1(void)
   *         现在改成把起步速度写进循迹基速，然后 VisionTask_Finish() 交回底盘，
   *         由 LineTracker_Step() 从当前姿态继续走。
   *
-  * @note   起步速度是**正常速度**，不是停之前那个速度。红灯前若因鸣笛或限速
-  *         标志处在减速档，绿灯起步一并解除——见 VISION_PARK2_FULL_SPEED 注释。
-  *         task_speed 也要一起改回去，否则下一个视觉事件会把减速档又同步下去。
+  * @note   速度由 VisionTask_StartRolling() 统一决定，与 1 号库超时起步同一段。
   */
 static void VisionTask_RunPark2(void)
 {
-#if VISION_PARK2_FULL_SPEED
-  task_speed = VISION_SPEED_FULL;
-#else
-  task_speed = VISION_SPEED_NORMAL;
-#endif
-
-  LineTracker_SetBaseSpeed(task_speed);
-  printf("[VTASK] green light, start at %u\r\n", (unsigned)task_speed);
-  VisionTask_Finish();
+  /* 绿灯正常起步：清掉可能残留的 1 号库压制窗口。真等到绿灯说明车已经离开
+     红灯牌，压制没有意义，留着反而会漏掉下一个真的 1 号库。 */
+  park1_ignore_active = 0U;
+  VisionTask_StartRolling("green light");
 }
 
 /**
@@ -377,10 +482,9 @@ uint8_t VisionTask_Step(void)
       return 1U;
 
     case VISION_TASK_STOPPED:
-      /* 1 号库结束后保持停止，仍占用底盘；新的视觉任务事件可重新唤醒
-         （见 VisionTask_Begin 对 STOPPED 的处理）。 */
-      Car_Stop();
-      return 1U;
+      /* 1 号库结束后保持停止，仍占用底盘；绿灯可以重新唤醒（见 VisionTask_Begin
+         对 STOPPED 的处理），等不到绿灯则由这里超时自己起步。 */
+      return VisionTask_RunStopped();
 
     default:
       return 0U;
@@ -400,6 +504,8 @@ void VisionTask_Cancel(void)
   task_phase = 0U;
   /* 鸣笛虽然不占底盘，但急停要静音——那时蜂鸣器归故障告警用。 */
   horn_active = 0U;
+  /* 急停后按钮重启当作全新一局，压制窗口不该跨过去。 */
+  park1_ignore_active = 0U;
 }
 
 uint8_t VisionTask_IsBusy(void)
